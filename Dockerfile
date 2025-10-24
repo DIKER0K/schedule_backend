@@ -16,6 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем код приложения
 COPY . .
 
+# Создаем пустой файл group_shifts.json с правильными правами
+RUN touch group_shifts.json && chmod 644 group_shifts.json
+
 # Создаем пользователя для безопасности
 RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
 USER app
