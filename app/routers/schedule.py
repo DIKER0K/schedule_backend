@@ -150,27 +150,47 @@ async def delete_schedule(group_name: str):
 
 
 def normalize_name(name: str) -> str:
-    """Удаляет все лишние пробелы, точки и невидимые символы"""
+    """Удаляет пробелы, точки и невидимые символы"""
     if not name:
         return ""
     name = name.strip().replace("\xa0", " ").replace("\u200b", "").replace("\ufeff", "")
-    # убрать все пробелы и точки, всё в нижний регистр
     return re.sub(r"[.\s]", "", name).lower()
+
+
+def fio_matches(fio1: str, fio2: str) -> bool:
+    """
+    Гибкое сравнение ФИО (поддержка 'Фамилия Имя Отчество', 'Фамилия И.О.' и т.д.)
+    """
+    if not fio1 or not fio2:
+        return False
+
+    def normalize_fio(fio):
+        fio = fio.strip()
+        parts = re.split(r"[\s.]+", fio)
+        parts = [p for p in parts if p]
+        return parts
+
+    p1, p2 = normalize_fio(fio1), normalize_fio(fio2)
+    if not p1 or not p2:
+        return False
+
+    # фамилия должна совпадать
+    if normalize_name(p1[0]) != normalize_name(p2[0]):
+        return False
+
+    # проверяем имя и отчество (инициалы)
+    initials1 = "".join([w[0].lower() for w in p1[1:]])  # например, Дмитрий Александрович -> да
+    initials2 = "".join([w[0].lower() for w in p2[1:]])
+
+    return initials1.startswith(initials2) or initials2.startswith(initials1)
+
 
 @router.get("/teacher/{fio:path}")
 async def get_teacher_schedule(fio: str):
-    """
-    Гибкий поиск расписания преподавателя.
-    Поддерживает 'Фамилия И.О.' или 'Фамилия Имя Отчество'.
-    Работает даже если в ФИО есть точки, пробелы и разные символы.
-    """
     fio = fio.strip()
     if not fio:
         raise HTTPException(status_code=400, detail="Некорректное ФИО преподавателя")
 
-    fio_normalized = normalize_name(fio)
-
-    # ❗ исправлено название коллекции — должно быть schedules, а не schedule
     schedules = await db.schedules.find().to_list(1000)
     teacher_schedule = {"first_shift": {}, "second_shift": {}}
 
@@ -183,13 +203,8 @@ async def get_teacher_schedule(fio: str):
         shift = (s.get("shift_info") or {}).get("shift", 1)
         shift_key = "first_shift" if shift == 1 else "second_shift"
 
-        # внутренняя функция проверки
         def match_teacher(teacher: str) -> bool:
-            if not teacher:
-                return False
-            t_norm = normalize_name(teacher)
-            # допускаем частичное совпадение
-            return fio_normalized in t_norm or t_norm in fio_normalized
+            return fio_matches(fio, teacher)
 
         # нулевая пара
         for day, zero in (schedule_data.get("zero_lesson") or {}).items():
