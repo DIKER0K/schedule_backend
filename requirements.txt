@@ -1,0 +1,6 @@
+fastapi
+motor
+python-docx
+python-decouple
+uvicorn
+python-multipart
