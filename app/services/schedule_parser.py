@@ -41,16 +41,34 @@ def parse_lesson_info_fixed(cell_text: str):
 
     teacher_match = re.search(r'([А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\.?)$', text)
     teacher = teacher_match.group(1) if teacher_match else ''
-    text_wo_teacher = re.sub(r'\s*' + re.escape(teacher) + r'\s*$', '', text).strip() if teacher else text
-    classroom_match = re.search(r'(\d{2,4}[А-Яа-я]?)$', text_wo_teacher)
-    classroom = classroom_match.group(1) if classroom_match else ''
-    subject = re.sub(r'\s*' + re.escape(classroom) + r'\s*$', '', text_wo_teacher).strip() if classroom else text_wo_teacher
+    subject = re.sub(r'\s*' + re.escape(teacher) + r'\s*$', '', text).strip() if teacher else text
 
     return {
         "subject": subject or text,
         "teacher": teacher,
-        "classroom": classroom
+        "classroom": ""  # Кабинет будет добавлен из group_shifts.json
     }
+
+def add_classrooms_to_schedule(schedule: dict, group_name: str, shifts: dict):
+    """Добавляет кабинеты из group_shifts.json к урокам в расписании"""
+    group_shift = shifts.get(group_name, {})
+    classroom = group_shift.get("room", "")
+    
+    if not classroom or classroom == "":
+        return schedule
+    
+    # Добавляем кабинет к нулевому уроку
+    for day in schedule["zero_lesson"]:
+        if schedule["zero_lesson"][day]:
+            schedule["zero_lesson"][day]["classroom"] = classroom
+    
+    # Добавляем кабинет к обычным урокам
+    for day in schedule["days"]:
+        for lesson_num in schedule["days"][day]:
+            if schedule["days"][day][lesson_num]:
+                schedule["days"][day][lesson_num]["classroom"] = classroom
+    
+    return schedule
 
 def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
     """Парсит таблицу с расписанием"""
@@ -157,9 +175,12 @@ async def load_schedule_to_db():
     # Очистим старые записи
     await db.schedules.delete_many({})
     for group, schedule in data.items():
+        # Добавляем кабинеты из group_shifts.json
+        schedule_with_classrooms = add_classrooms_to_schedule(schedule, group, shifts)
+        
         await db.schedules.insert_one({
             "group_name": group,
-            "schedule": schedule,
+            "schedule": schedule_with_classrooms,
             "shift_info": shifts.get(group, {"shift": 1}),
             "updated_at": datetime.now()
         })

@@ -2,7 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from datetime import datetime
 from bson import ObjectId
 from app.database import db
-from app.services.schedule_parser import parse_schedule_from_docx, load_group_shifts
+from app.services.schedule_parser import parse_schedule_from_docx, load_group_shifts, add_classrooms_to_schedule
 import re
 
 router = APIRouter()
@@ -92,9 +92,12 @@ async def upload_schedule(
             elif shift_num == 2:
                 second_shift_count += 1
 
+            # Добавляем кабинеты из group_shifts.json
+            schedule_with_classrooms = add_classrooms_to_schedule(schedule, group, shifts)
+
             doc = {
                 "group_name": group,
-                "schedule": schedule,
+                "schedule": schedule_with_classrooms,  # ← Теперь с кабинетами!
                 "shift_info": shift_info,
                 "updated_at": datetime.now(),
             }
