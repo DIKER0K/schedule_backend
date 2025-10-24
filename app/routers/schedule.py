@@ -52,18 +52,18 @@ async def get_schedule(
 ):
     """
     Возвращает расписание группы.
-    Если указан `day`, возвращает только пары за этот день.
-    Также возвращает информацию о смене.
+    Ошибки:
+    - 404: группа не найдена;
+    - 204/404: группа есть, но в этот день нет пар.
     """
     schedule = await db.schedules.find_one({"group_name": group_name})
     if not schedule:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+        raise HTTPException(status_code=404, detail=f"Группа '{group_name}' не найдена")
 
     schedule = serialize_doc(schedule)
     shift_info = schedule.get("shift_info", {})
 
     if not day:
-        # Вернуть всё расписание с информацией о смене
         return {
             "group_name": group_name,
             "shift_info": shift_info,
@@ -71,26 +71,28 @@ async def get_schedule(
             "schedule": schedule.get("schedule", {})
         }
 
-    # фильтрация по дню
     normalized_day = normalize_day_name(day)
     schedule_data = schedule.get("schedule", {})
     filtered_schedule = {}
 
-    # нулевая пара
+    # фильтрация
     zero = schedule_data.get("zero_lesson", {})
     for dname, info in zero.items():
         if normalize_day_name(dname) == normalized_day:
             filtered_schedule["zero_lesson"] = {dname: info}
 
-    # обычные пары
     days = schedule_data.get("days", {})
     for dname, lessons in days.items():
         if normalize_day_name(dname) == normalized_day:
             filtered_schedule["days"] = {dname: lessons}
             break
 
+    # ❗ Если группа есть, но в этот день нет пар
     if not filtered_schedule:
-        raise HTTPException(status_code=404, detail=f"No schedule for group '{group_name}' on '{day}'")
+        raise HTTPException(
+            status_code=404,
+            detail=f"У группы '{group_name}' нет занятий в день '{day}'"
+        )
 
     return {
         "group_name": group_name,
@@ -233,8 +235,9 @@ async def get_teacher_schedule(
 ):
     """
     Гибкий поиск расписания преподавателя.
-    Поддерживает 'Фамилия И.О.' или 'Фамилия Имя Отчество'.
-    Теперь также можно указать `day`, чтобы получить расписание только за этот день.
+    Теперь возвращает разные ошибки:
+    - 404: преподаватель не найден вообще;
+    - 204: преподаватель найден, но в указанный день у него нет пар.
     """
     fio = fio.strip()
     if not fio:
@@ -244,6 +247,7 @@ async def get_teacher_schedule(
     normalized_day = normalize_day_name(day) if day else None
 
     schedules = await db.schedules.find().to_list(1000)
+    teacher_found_anywhere = False  # 👈 отметим, что преподаватель вообще существует
     teacher_schedule = {"first_shift": {}, "second_shift": {}}
 
     for s in schedules:
@@ -264,6 +268,7 @@ async def get_teacher_schedule(
         # нулевая пара
         for day_name, zero in (schedule_data.get("zero_lesson") or {}).items():
             if zero and match_teacher(zero.get("teacher", "")):
+                teacher_found_anywhere = True
                 if not normalized_day or normalize_day_name(day_name) == normalized_day:
                     teacher_schedule[shift_key].setdefault(day_name, {})
                     teacher_schedule[shift_key][day_name]["0"] = {
@@ -274,20 +279,26 @@ async def get_teacher_schedule(
 
         # обычные пары
         for day_name, lessons in (schedule_data.get("days") or {}).items():
-            if normalized_day and normalize_day_name(day_name) != normalized_day:
-                continue
             for num, info in (lessons or {}).items():
                 if info and match_teacher(info.get("teacher", "")):
-                    teacher_schedule[shift_key].setdefault(day_name, {})
-                    teacher_schedule[shift_key][day_name][num] = {
-                        "subject": info.get("subject", ""),
-                        "group": group_name,
-                        "classroom": info.get("classroom", "")
-                    }
+                    teacher_found_anywhere = True
+                    if not normalized_day or normalize_day_name(day_name) == normalized_day:
+                        teacher_schedule[shift_key].setdefault(day_name, {})
+                        teacher_schedule[shift_key][day_name][num] = {
+                            "subject": info.get("subject", ""),
+                            "group": group_name,
+                            "classroom": info.get("classroom", "")
+                        }
 
-    if not any(teacher_schedule["first_shift"].values()) and not any(teacher_schedule["second_shift"].values()):
-        raise HTTPException(status_code=404, detail=f"Расписание для преподавателя '{fio}' не найдено")
+    # ❌ Если вообще не найден преподаватель
+    if not teacher_found_anywhere:
+        raise HTTPException(status_code=404, detail=f"Преподаватель '{fio}' не найден в расписании")
 
+    # ❗ Если преподаватель найден, но в этот день нет пар
+    if normalized_day and not any(teacher_schedule["first_shift"].values()) and not any(teacher_schedule["second_shift"].values()):
+        raise HTTPException(status_code=404, detail=f"У преподавателя '{fio}' нет пар в день '{day}'")
+
+    # ✅ Всё хорошо
     return {
         "teacher_fio": fio,
         "filtered_by_day": day if day else None,
