@@ -16,11 +16,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем код приложения
 COPY . .
 
-# Создаем пустой файл group_shifts.json с правильными правами
-RUN touch group_shifts.json && chmod 644 group_shifts.json
-
 # Создаем пользователя для безопасности
-RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
+RUN useradd --create-home --shell /bin/bash app
+
+# Создаем пустой файл group_shifts.json с правильными правами ПОСЛЕ создания пользователя
+RUN rm -rf group_shifts.json && \
+    touch group_shifts.json && \
+    chmod 644 group_shifts.json && \
+    chown app:app group_shifts.json
+
+# Меняем владельца всех файлов на пользователя app
+RUN chown -R app:app /app
+
 USER app
 
 # Открываем порт
