@@ -1,12 +1,15 @@
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Query
 from app.database import db
 from app.models.user import User
 
 router = APIRouter()
 
 @router.get("/", response_model=list[User])
-async def get_users():
-    users = await db.users.find().to_list(100)
+async def get_users(
+    skip: int = Query(0, ge=0, description="Количество пропущенных записей"),
+    limit: int = Query(100, gt=0, le=1000, description="Количество записей для получения (по умолчанию 100, максимум 1000)")
+):
+    users = await db.users.find().skip(skip).limit(limit).to_list(length=limit)
     return users
 
 @router.get("/{user_id}", response_model=User)
