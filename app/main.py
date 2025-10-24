@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.concurrency import asynccontextmanager
-from app.routers import users, schedule
+from app.routers import users, schedule, user_events
 from app.database import db
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,6 +22,7 @@ async def startup_event():
 
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(schedule.router, prefix="/schedule", tags=["Schedule"])
+app.include_router(user_events.router, prefix="/user-events", tags=["User Events"])
 
 @app.get("/")
 def root():
