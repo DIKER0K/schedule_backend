@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Query, UploadFile, File, HTTPException
 from datetime import datetime
 from bson import ObjectId
 from app.database import db
@@ -15,6 +15,28 @@ def serialize_doc(doc):
     doc["_id"] = str(doc["_id"])
     return doc
 
+def normalize_day_name(day: str) -> str:
+    """Приводит день недели к стандартной форме (без регистра, синонимы)"""
+    if not day:
+        return ""
+    day = day.strip().lower()
+    mapping = {
+        "пн": "понедельник", "понедельник": "понедельник", "mon": "понедельник",
+        "вт": "вторник", "вторник": "вторник", "tue": "вторник",
+        "ср": "среда", "среда": "среда", "wed": "среда",
+        "чт": "четверг", "четверг": "четверг", "thu": "четверг",
+        "пт": "пятница", "пятница": "пятница", "fri": "пятница",
+        "сб": "суббота", "суббота": "суббота", "sat": "суббота",
+    }
+    return mapping.get(day, day)
+
+
+def normalize_name(name: str) -> str:
+    """Удаляет все лишние пробелы, точки и невидимые символы"""
+    if not name:
+        return ""
+    name = name.strip().replace("\xa0", " ").replace("\u200b", "").replace("\ufeff", "")
+    return re.sub(r"[.\s]", "", name).lower()
 
 # 📘 Получение всех расписаний
 @router.get("/", response_model=list)
@@ -23,13 +45,60 @@ async def get_all_schedules():
     return [serialize_doc(s) for s in schedules]
 
 
-# 📘 Получение расписания по названию группы
 @router.get("/{group_name}", response_model=dict)
-async def get_schedule(group_name: str):
+async def get_schedule(
+    group_name: str,
+    day: str | None = Query(None, description="Опционально: день недели (например, Понедельник, Вт, Mon)")
+):
+    """
+    Возвращает расписание группы.
+    Если указан `day`, возвращает только пары за этот день.
+    Также возвращает информацию о смене.
+    """
     schedule = await db.schedules.find_one({"group_name": group_name})
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    return serialize_doc(schedule)
+
+    schedule = serialize_doc(schedule)
+    shift_info = schedule.get("shift_info", {})
+
+    if not day:
+        # Вернуть всё расписание с информацией о смене
+        return {
+            "group_name": group_name,
+            "shift_info": shift_info,
+            "updated_at": schedule.get("updated_at"),
+            "schedule": schedule.get("schedule", {})
+        }
+
+    # фильтрация по дню
+    normalized_day = normalize_day_name(day)
+    schedule_data = schedule.get("schedule", {})
+    filtered_schedule = {}
+
+    # нулевая пара
+    zero = schedule_data.get("zero_lesson", {})
+    for dname, info in zero.items():
+        if normalize_day_name(dname) == normalized_day:
+            filtered_schedule["zero_lesson"] = {dname: info}
+
+    # обычные пары
+    days = schedule_data.get("days", {})
+    for dname, lessons in days.items():
+        if normalize_day_name(dname) == normalized_day:
+            filtered_schedule["days"] = {dname: lessons}
+            break
+
+    if not filtered_schedule:
+        raise HTTPException(status_code=404, detail=f"No schedule for group '{group_name}' on '{day}'")
+
+    return {
+        "group_name": group_name,
+        "shift_info": shift_info,
+        "day": day,
+        "filtered_schedule": filtered_schedule,
+        "updated_at": schedule.get("updated_at"),
+    }
 
 
 # 📤 Загрузка нового DOCX расписания (с заменой старого)
@@ -150,46 +219,29 @@ async def delete_schedule(group_name: str):
 
 
 def normalize_name(name: str) -> str:
-    """Удаляет пробелы, точки и невидимые символы"""
+    """Удаляет все лишние пробелы, точки и невидимые символы"""
     if not name:
         return ""
     name = name.strip().replace("\xa0", " ").replace("\u200b", "").replace("\ufeff", "")
+    # убрать все пробелы и точки, всё в нижний регистр
     return re.sub(r"[.\s]", "", name).lower()
 
-
-def fio_matches(fio1: str, fio2: str) -> bool:
-    """
-    Гибкое сравнение ФИО (поддержка 'Фамилия Имя Отчество', 'Фамилия И.О.' и т.д.)
-    """
-    if not fio1 or not fio2:
-        return False
-
-    def normalize_fio(fio):
-        fio = fio.strip()
-        parts = re.split(r"[\s.]+", fio)
-        parts = [p for p in parts if p]
-        return parts
-
-    p1, p2 = normalize_fio(fio1), normalize_fio(fio2)
-    if not p1 or not p2:
-        return False
-
-    # фамилия должна совпадать
-    if normalize_name(p1[0]) != normalize_name(p2[0]):
-        return False
-
-    # проверяем имя и отчество (инициалы)
-    initials1 = "".join([w[0].lower() for w in p1[1:]])  # например, Дмитрий Александрович -> да
-    initials2 = "".join([w[0].lower() for w in p2[1:]])
-
-    return initials1.startswith(initials2) or initials2.startswith(initials1)
-
-
 @router.get("/teacher/{fio:path}")
-async def get_teacher_schedule(fio: str):
+async def get_teacher_schedule(
+    fio: str,
+    day: str | None = Query(None, description="Опционально: день недели (например, Понедельник, Вт, Mon)")
+):
+    """
+    Гибкий поиск расписания преподавателя.
+    Поддерживает 'Фамилия И.О.' или 'Фамилия Имя Отчество'.
+    Теперь также можно указать `day`, чтобы получить расписание только за этот день.
+    """
     fio = fio.strip()
     if not fio:
         raise HTTPException(status_code=400, detail="Некорректное ФИО преподавателя")
+
+    fio_normalized = normalize_name(fio)
+    normalized_day = normalize_day_name(day) if day else None
 
     schedules = await db.schedules.find().to_list(1000)
     teacher_schedule = {"first_shift": {}, "second_shift": {}}
@@ -204,24 +256,30 @@ async def get_teacher_schedule(fio: str):
         shift_key = "first_shift" if shift == 1 else "second_shift"
 
         def match_teacher(teacher: str) -> bool:
-            return fio_matches(fio, teacher)
+            if not teacher:
+                return False
+            t_norm = normalize_name(teacher)
+            return fio_normalized in t_norm or t_norm in fio_normalized
 
         # нулевая пара
-        for day, zero in (schedule_data.get("zero_lesson") or {}).items():
+        for day_name, zero in (schedule_data.get("zero_lesson") or {}).items():
             if zero and match_teacher(zero.get("teacher", "")):
-                teacher_schedule[shift_key].setdefault(day, {})
-                teacher_schedule[shift_key][day]["0"] = {
-                    "subject": zero.get("subject", ""),
-                    "group": group_name,
-                    "classroom": zero.get("classroom", "")
-                }
+                if not normalized_day or normalize_day_name(day_name) == normalized_day:
+                    teacher_schedule[shift_key].setdefault(day_name, {})
+                    teacher_schedule[shift_key][day_name]["0"] = {
+                        "subject": zero.get("subject", ""),
+                        "group": group_name,
+                        "classroom": zero.get("classroom", "")
+                    }
 
         # обычные пары
-        for day, lessons in (schedule_data.get("days") or {}).items():
+        for day_name, lessons in (schedule_data.get("days") or {}).items():
+            if normalized_day and normalize_day_name(day_name) != normalized_day:
+                continue
             for num, info in (lessons or {}).items():
                 if info and match_teacher(info.get("teacher", "")):
-                    teacher_schedule[shift_key].setdefault(day, {})
-                    teacher_schedule[shift_key][day][num] = {
+                    teacher_schedule[shift_key].setdefault(day_name, {})
+                    teacher_schedule[shift_key][day_name][num] = {
                         "subject": info.get("subject", ""),
                         "group": group_name,
                         "classroom": info.get("classroom", "")
@@ -230,4 +288,8 @@ async def get_teacher_schedule(fio: str):
     if not any(teacher_schedule["first_shift"].values()) and not any(teacher_schedule["second_shift"].values()):
         raise HTTPException(status_code=404, detail=f"Расписание для преподавателя '{fio}' не найдено")
 
-    return {"teacher_fio": fio, "schedule": teacher_schedule}
+    return {
+        "teacher_fio": fio,
+        "filtered_by_day": day if day else None,
+        "schedule": teacher_schedule
+    }
