@@ -1,7 +1,11 @@
+from typing import List
 from fastapi import APIRouter, Query, UploadFile, File, HTTPException
 from datetime import datetime
 from bson import ObjectId
 from app.database import db
+from app.models.schedule import Schedule
+from app.models.schedule_upload import UploadResponse
+from app.models.teacher_schedule import TeacherScheduleResponse
 from app.services.schedule_parser import parse_schedule_from_docx, load_group_shifts, add_classrooms_to_schedule
 import re
 
@@ -39,13 +43,13 @@ def normalize_name(name: str) -> str:
     return re.sub(r"[.\s]", "", name).lower()
 
 # 📘 Получение всех расписаний
-@router.get("/", response_model=list)
+@router.get("/", response_model=List[Schedule])
 async def get_all_schedules():
     schedules = await db.schedules.find().to_list(100)
-    return [serialize_doc(s) for s in schedules]
+    return [Schedule(**serialize_doc(s)) for s in schedules]
 
 
-@router.get("/{group_name}", response_model=dict)
+@router.get("/{group_name}", response_model=Schedule)
 async def get_schedule(
     group_name: str,
     day: str | None = Query(None, description="Опционально: день недели (например, Понедельник, Вт, Mon)")
@@ -64,12 +68,12 @@ async def get_schedule(
     shift_info = schedule.get("shift_info", {})
 
     if not day:
-        return {
-            "group_name": group_name,
-            "shift_info": shift_info,
-            "updated_at": schedule.get("updated_at"),
-            "schedule": schedule.get("schedule", {})
-        }
+        return Schedule(
+            group_name=group_name,
+            shift_info=shift_info,
+            updated_at=schedule.get("updated_at"),
+            schedule=schedule.get("schedule", {})
+        )
 
     normalized_day = normalize_day_name(day)
     schedule_data = schedule.get("schedule", {})
@@ -104,7 +108,7 @@ async def get_schedule(
 
 
 # 📤 Загрузка нового DOCX расписания (с заменой старого)
-@router.post("/upload", response_model=dict)
+@router.post("/upload", response_model=UploadResponse)
 async def upload_schedule(
     schedule_file: UploadFile = File(..., description="DOCX файл с расписанием"),
     shifts_file: UploadFile | None = File(None, description="(Необязательно) JSON файл с информацией о сменах")
@@ -175,16 +179,16 @@ async def upload_schedule(
             result = await db.schedules.insert_one(doc)
             inserted.append(str(result.inserted_id))
 
-        return {
-            "message": (
+        return UploadResponse(
+            message=(
                 f"✅ Расписание загружено для {len(inserted)} групп "
                 f"({first_shift_count} — 1 смена, {second_shift_count} — 2 смена)"
             ),
-            "inserted_ids": inserted,
-            "total_groups": len(inserted),
-            "first_shift": first_shift_count,
-            "second_shift": second_shift_count
-        }
+            inserted_ids=inserted,
+            total_groups=len(inserted),
+            first_shift=first_shift_count,
+            second_shift=second_shift_count
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка при обработке файлов: {e}")
@@ -193,22 +197,6 @@ async def upload_schedule(
         for path in [temp_docx, temp_json]:
             if path and os.path.exists(path):
                 os.remove(path)
-
-
-# 🔄 Добавление или обновление расписания вручную
-@router.post("/", response_model=dict)
-async def create_or_replace_schedule(schedule: dict):
-    """
-    Создаёт или заменяет расписание конкретной группы.
-    """
-    group_name = schedule.get("group_name")
-    if not group_name:
-        raise HTTPException(status_code=400, detail="Field 'group_name' is required")
-
-    await db.schedules.update_one(
-        {"group_name": group_name}, {"$set": schedule}, upsert=True
-    )
-    return {"message": f"Schedule for group '{group_name}' created or updated"}
 
 
 # ❌ Удаление расписания группы
@@ -228,7 +216,7 @@ def normalize_name(name: str) -> str:
     # убрать все пробелы и точки, всё в нижний регистр
     return re.sub(r"[.\s]", "", name).lower()
 
-@router.get("/teacher/{fio:path}")
+@router.get("/teacher/{fio:path}", response_model=TeacherScheduleResponse)
 async def get_teacher_schedule(
     fio: str,
     day: str | None = Query(None, description="Опционально: день недели (например, Понедельник, Вт, Mon)")
@@ -299,8 +287,8 @@ async def get_teacher_schedule(
         raise HTTPException(status_code=404, detail=f"У преподавателя '{fio}' нет пар в день '{day}'")
 
     # ✅ Всё хорошо
-    return {
-        "teacher_fio": fio,
-        "filtered_by_day": day if day else None,
-        "schedule": teacher_schedule
-    }
+    return TeacherScheduleResponse(
+        teacher_fio=fio,
+        filtered_by_day=day if day else None,
+        schedule=teacher_schedule
+    )
