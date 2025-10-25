@@ -1,12 +1,28 @@
+import asyncio
 from fastapi import FastAPI
-from fastapi.concurrency import asynccontextmanager
+from contextlib import asynccontextmanager
 from app.routers import users, schedule
 from app.database import db
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 
-app = FastAPI(title="College Schedule Bot API")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
-from app.services.schedule_parser import start_background_schedule_updater
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Starting up...")
+
+    # создаём индексы Mongo
+    await db.schedules.create_index("group_name", unique=True)
+    await db.users.create_index("user_id", unique=True)
+
+    yield
+
+    logger.info("🛑 Shutting down...")
+    db.client.close()
+
+app = FastAPI(title="College Schedule Bot API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,9 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@asynccontextmanager
-async def startup_event():
-    start_background_schedule_updater()
+
 
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(schedule.router, prefix="/schedule", tags=["Schedule"])

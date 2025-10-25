@@ -185,16 +185,3 @@ async def load_schedule_to_db():
             "updated_at": datetime.now()
         })
     print(f"✅ Залито расписание для {len(data)} групп в MongoDB")
-
-async def update_schedule_loop(interval_hours=1):
-    """Фоновая задача, обновляющая расписание каждые X часов"""
-    while True:
-        try:
-            await load_schedule_to_db()
-        except Exception as e:
-            print(f"❌ Ошибка обновления расписания: {e}")
-        await asyncio.sleep(interval_hours * 3600)
-
-def start_background_schedule_updater():
-    """Запускает асинхронный фоновой процесс"""
-    asyncio.create_task(update_schedule_loop())
