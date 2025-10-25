@@ -3,7 +3,7 @@ from fastapi import HTTPException, UploadFile
 from app.database import db
 from app.models.schedule import Schedule
 from app.models.schedule_upload import UploadResponse
-from app.models.teacher_schedule import TeacherScheduleResponse
+from app.models.teacher_schedule import TeacherLesson, TeacherScheduleResponse, TeacherShiftSchedule
 from app.services.schedule_parser import add_classrooms_to_schedule, load_group_shifts, parse_schedule_from_docx
 from app.utils.common import normalize_day_name, normalize_name, serialize_doc
 
@@ -179,8 +179,9 @@ class ScheduleService:
         normalized_day = normalize_day_name(day) if day else None
 
         schedules = await db.schedules.find().to_list(1000)
-        teacher_found_anywhere = False  # 👈 отметим, что преподаватель вообще существует
-        teacher_schedule = {"first_shift": {}, "second_shift": {}}
+        teacher_found_anywhere = False
+        first_shift = {}
+        second_shift = {}
 
         for s in schedules:
             group_name = s.get("group_name")
@@ -189,7 +190,7 @@ class ScheduleService:
                 continue
 
             shift = (s.get("shift_info") or {}).get("shift", 1)
-            shift_key = "first_shift" if shift == 1 else "second_shift"
+            shift_target = first_shift if shift == 1 else second_shift
 
             def match_teacher(teacher: str) -> bool:
                 if not teacher:
@@ -202,12 +203,13 @@ class ScheduleService:
                 if zero and match_teacher(zero.get("teacher", "")):
                     teacher_found_anywhere = True
                     if not normalized_day or normalize_day_name(day_name) == normalized_day:
-                        teacher_schedule[shift_key].setdefault(day_name, {})
-                        teacher_schedule[shift_key][day_name]["0"] = {
-                            "subject": zero.get("subject", ""),
-                            "group": group_name,
-                            "classroom": zero.get("classroom", "")
-                        }
+                        shift_target.setdefault(day_name, {})
+                        shift_target[day_name]["0"] = TeacherLesson(
+                            subject=zero.get("subject", ""),
+                            group=group_name,
+                            classroom=zero.get("classroom", ""),
+                            time=zero.get("time")
+                        )
 
             # обычные пары
             for day_name, lessons in (schedule_data.get("days") or {}).items():
@@ -215,24 +217,22 @@ class ScheduleService:
                     if info and match_teacher(info.get("teacher", "")):
                         teacher_found_anywhere = True
                         if not normalized_day or normalize_day_name(day_name) == normalized_day:
-                            teacher_schedule[shift_key].setdefault(day_name, {})
-                            teacher_schedule[shift_key][day_name][num] = {
-                                "subject": info.get("subject", ""),
-                                "group": group_name,
-                                "classroom": info.get("classroom", "")
-                            }
+                            shift_target.setdefault(day_name, {})
+                            shift_target[day_name][num] = TeacherLesson(
+                                subject=info.get("subject", ""),
+                                group=group_name,
+                                classroom=info.get("classroom", ""),
+                                time=info.get("time")
+                            )
 
-        # ❌ Если вообще не найден преподаватель
         if not teacher_found_anywhere:
             raise HTTPException(status_code=404, detail=f"Преподаватель '{fio}' не найден в расписании")
 
-        # ❗ Если преподаватель найден, но в этот день нет пар
-        if normalized_day and not any(teacher_schedule["first_shift"].values()) and not any(teacher_schedule["second_shift"].values()):
+        if normalized_day and not any(first_shift.values()) and not any(second_shift.values()):
             raise HTTPException(status_code=404, detail=f"У преподавателя '{fio}' нет пар в день '{day}'")
 
-        # ✅ Всё хорошо
         return TeacherScheduleResponse(
             teacher_fio=fio,
             filtered_by_day=day if day else None,
-            schedule=teacher_schedule
+            schedule=TeacherShiftSchedule(first_shift=first_shift, second_shift=second_shift)
         )

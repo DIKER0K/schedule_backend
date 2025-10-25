@@ -5,6 +5,7 @@ class TeacherLesson(BaseModel):
     subject: str
     group: str
     classroom: Optional[str]
+    time: Optional[str] = None
 
 class TeacherShiftSchedule(BaseModel):
     first_shift: Dict[str, Dict[str, TeacherLesson]]

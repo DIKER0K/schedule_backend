@@ -6,6 +6,7 @@ class Lesson(BaseModel):
     subject: str
     teacher: Optional[str] = None
     classroom: Optional[str] = None
+    time: Optional[str] = None
 
 class ScheduleData(BaseModel):
     zero_lesson: Dict[str, Dict[str, Lesson]] = {}

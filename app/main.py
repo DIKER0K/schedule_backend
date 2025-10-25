@@ -1,7 +1,7 @@
 import asyncio
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from app.routers import users, schedule
+from app.routers import bell_schedule, users, schedule
 from app.database import db
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -36,6 +36,7 @@ app.add_middleware(
 
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(schedule.router, prefix="/schedule", tags=["Schedule"])
+app.include_router(bell_schedule.router, prefix="/bell_schedule", tags=["Bell schedule"])
 
 @app.get("/")
 def root():
