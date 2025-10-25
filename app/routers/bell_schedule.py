@@ -65,6 +65,10 @@ async def upload_special_bell_schedule(file: UploadFile = File(...)):
 
 # === 🔧 Общая функция обновления всех расписаний ===
 async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = None):
+    """
+    Обновляет все расписания в БД, добавляя поле 'time' по расписанию звонков.
+    Поддерживает оба варианта ключей: 'вторник-четверг' и 'вторник_четверг'.
+    """
     schedules = await db.schedules.find().to_list(None)
     updated_count = 0
 
@@ -75,23 +79,39 @@ async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = N
         schedule = s.get("schedule", {})
         modified = False
 
+        # проходим по zero_lesson и days
         for section in ["zero_lesson", "days"]:
-            for day_name, lessons in schedule.get(section, {}).items():
+            section_data = schedule.get(section, {})
+            for day_name, lessons in section_data.items():
                 normalized_day = normalize_day_name(day_name)
 
-                # Если нужно обновить только определённые дни
+                # если обновляем только определённые дни
                 if only_days and normalized_day not in only_days:
                     continue
 
+                # определяем ключ для звонков
                 key = normalized_day
                 if normalized_day in ["вторник", "среда", "четверг"]:
                     key = "вторник-четверг"
 
+                # fallback: если ключ с дефисом не найден — пробуем с подчёркиванием
+                if key not in bell_data:
+                    alt_key = key.replace("-", "_")
+                    if alt_key in bell_data:
+                        key = alt_key
+
                 shift_key = f"{shift}_shift"
                 bell_times = bell_data.get(key, {}).get(shift_key, {})
 
+                # если всё равно не нашли — пропускаем
+                if not bell_times:
+                    continue
+
+                # применяем время для каждой пары
                 for lesson_num, lesson_data in lessons.items():
-                    time_str = bell_times.get(lesson_num)
+                    # поддержка строковых ключей (например, "1", "2")
+                    lesson_num_str = str(lesson_num).strip()
+                    time_str = bell_times.get(lesson_num_str)
                     if time_str:
                         lesson_data["time"] = time_str
                         modified = True
