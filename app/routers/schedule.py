@@ -159,20 +159,23 @@ def normalize_name(name: str) -> str:
 
 @router.get("/teacher/{fio:path}")
 async def get_teacher_schedule(fio: str):
-    """
-    Гибкий поиск расписания преподавателя.
-    Поддерживает 'Фамилия И.О.' или 'Фамилия Имя Отчество'.
-    Работает даже если в ФИО есть точки, пробелы и разные символы.
-    """
     fio = fio.strip()
     if not fio:
         raise HTTPException(status_code=400, detail="Некорректное ФИО преподавателя")
 
     fio_normalized = normalize_name(fio)
 
-    # ❗ исправлено название коллекции — должно быть schedules, а не schedule
     schedules = await db.schedules.find().to_list(1000)
     teacher_schedule = {"first_shift": {}, "second_shift": {}}
+
+    def coerce_shift(v):
+        # приведение типов: "0"/"1"/"2" -> int, всё остальное -> None
+        if v is None or v == "":
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
 
     for s in schedules:
         group_name = s.get("group_name")
@@ -180,15 +183,30 @@ async def get_teacher_schedule(fio: str):
         if not schedule_data:
             continue
 
-        shift = (s.get("shift_info") or {}).get("shift", 1)
-        shift_key = "first_shift" if shift == 1 else "second_shift"
+        raw_shift = (s.get("shift_info") or {}).get("shift", 1)
+        shift = coerce_shift(raw_shift)
 
-        # внутренняя функция проверки
+        # БИЗНЕС-ПРАВИЛО:
+        # 0 — «не показывать» (скрытая группа) => пропускаем её целиком
+        if shift == 0:
+            continue
+
+        # None -> по умолчанию считаем 1 сменой (можно поменять на нужное вам)
+        if shift is None:
+            shift = 1
+
+        if shift == 1:
+            shift_key = "first_shift"
+        elif shift == 2:
+            shift_key = "second_shift"
+        else:
+            # неизвестные значения (>2) игнорируем, чтобы не ломать выдачу
+            continue
+
         def match_teacher(teacher: str) -> bool:
             if not teacher:
                 return False
             t_norm = normalize_name(teacher)
-            # допускаем частичное совпадение
             return fio_normalized in t_norm or t_norm in fio_normalized
 
         # нулевая пара
