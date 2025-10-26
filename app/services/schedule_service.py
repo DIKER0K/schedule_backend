@@ -164,7 +164,7 @@ class ScheduleService:
         return {"message": f"Schedule for '{group_name}' deleted"}
     
     @staticmethod
-    async def get_teacher_schedule(fio: str,day: str | None):
+    async def get_teacher_schedule(fio: str, day: str | None):
         """
         Гибкий поиск расписания преподавателя.
         Теперь возвращает разные ошибки:
@@ -174,30 +174,71 @@ class ScheduleService:
         fio = fio.strip()
         if not fio:
             raise HTTPException(status_code=400, detail="Некорректное ФИО преподавателя")
-
+    
         fio_normalized = normalize_name(fio)
         normalized_day = normalize_day_name(day) if day else None
-
+    
         schedules = await db.schedules.find().to_list(1000)
+    
         teacher_found_anywhere = False
-        first_shift = {}
-        second_shift = {}
-
+        first_shift: dict[str, dict] = {}
+        second_shift: dict[str, dict] = {}
+    
+        # --- ЛОГИКА ДЕЛЕНИЯ СМЕН (перенесено из первого куска) ---
+    
+        def coerce_shift(v):
+            # "0"/"1"/"2" -> int, остальное -> None
+            if v is None or v == "":
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+    
+        def pick_shift_target(raw_shift_value):
+            """
+            Возвращает (target_dict | None) в зависимости от бизнес-правил:
+            - 0 -> скрытая группа, вернуть None (пропустить)
+            - None -> по умолчанию 1-я смена
+            - 1 -> first_shift
+            - 2 -> second_shift
+            - >2 -> неизвестно, вернуть None (пропустить)
+            """
+            shift_value = coerce_shift(raw_shift_value)
+    
+            if shift_value == 0:
+                return None  # скрытая группа
+    
+            if shift_value is None:
+                shift_value = 1  # дефолт — 1-я смена
+    
+            if shift_value == 1:
+                return first_shift
+            if shift_value == 2:
+                return second_shift
+    
+            # неизвестные значения (>2) игнорируем
+            return None
+    
+        # --- Поиск занятий преподавателя с учетом смен ---
         for s in schedules:
             group_name = s.get("group_name")
             schedule_data = s.get("schedule", {})
             if not schedule_data:
                 continue
-
-            shift = (s.get("shift_info") or {}).get("shift", 1)
-            shift_target = first_shift if shift == 1 else second_shift
-
+    
+            raw_shift = (s.get("shift_info") or {}).get("shift", 1)
+            shift_target = pick_shift_target(raw_shift)
+            if shift_target is None:
+                # скрытая группа или неизвестная смена — пропускаем
+                continue
+    
             def match_teacher(teacher: str) -> bool:
                 if not teacher:
                     return False
                 t_norm = normalize_name(teacher)
                 return fio_normalized in t_norm or t_norm in fio_normalized
-
+    
             # нулевая пара
             for day_name, zero in (schedule_data.get("zero_lesson") or {}).items():
                 if zero and match_teacher(zero.get("teacher", "")):
@@ -208,9 +249,9 @@ class ScheduleService:
                             subject=zero.get("subject", ""),
                             group=group_name,
                             classroom=zero.get("classroom", ""),
-                            time=zero.get("time")
+                            time=zero.get("time"),
                         )
-
+    
             # обычные пары
             for day_name, lessons in (schedule_data.get("days") or {}).items():
                 for num, info in (lessons or {}).items():
@@ -222,17 +263,19 @@ class ScheduleService:
                                 subject=info.get("subject", ""),
                                 group=group_name,
                                 classroom=info.get("classroom", ""),
-                                time=info.get("time")
+                                time=info.get("time"),
                             )
-
+    
         if not teacher_found_anywhere:
             raise HTTPException(status_code=404, detail=f"Преподаватель '{fio}' не найден в расписании")
-
+    
+        # Если фильтровали по дню и ничего не попало в обе смены:
         if normalized_day and not any(first_shift.values()) and not any(second_shift.values()):
-            raise HTTPException(status_code=404, detail=f"У преподавателя '{fio}' нет пар в день '{day}'")
-
+            # В комментарии выше у вас указан 204; оставляю как в описании.
+            raise HTTPException(status_code=204, detail=f"У преподавателя '{fio}' нет пар в день '{day}'")
+    
         return TeacherScheduleResponse(
             teacher_fio=fio,
             filtered_by_day=day if day else None,
-            schedule=TeacherShiftSchedule(first_shift=first_shift, second_shift=second_shift)
+            schedule=TeacherShiftSchedule(first_shift=first_shift, second_shift=second_shift),
         )
