@@ -3,13 +3,13 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict
 
 class Lesson(BaseModel):
-    subject: str
+    subject: Optional[str] = None
     teacher: Optional[str] = None
     classroom: Optional[str] = None
     time: Optional[str] = None
 
 class ScheduleData(BaseModel):
-    zero_lesson: Dict[str, Dict[str, Lesson]] = {}
+    zero_lesson: Dict[str, Lesson] = {}
     days: Dict[str, Dict[str, Lesson]] = {}
 
 class Schedule(BaseModel):
