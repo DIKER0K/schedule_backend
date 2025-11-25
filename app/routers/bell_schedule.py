@@ -3,7 +3,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from app.database import db
 from app.utils.common import normalize_day_name
 
-router = APIRouter(prefix="/bell", tags=["Расписание звонков"])
+router = APIRouter(prefix="", tags=["Расписание звонков"])
 
 MAIN_BELL_FILE = "bell_schedule.json"
 OVERRIDE_FILE = "bell_schedule_overrides.json"
