@@ -143,15 +143,30 @@ def parse_schedule_from_docx(file_path: str):
 def load_group_shifts():
     if not os.path.exists(SHIFTS_FILE):
         return {}
+
+    def _normalize_int(value, default=None):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     try:
         with open(SHIFTS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             normalized = {}
             for k, v in data.items():
                 if isinstance(v, dict):
-                    normalized[k] = {"shift": v.get("shift", 1), "room": v.get("room", "")}
+                    normalized[k] = {
+                        "shift": _normalize_int(v.get("shift", 1), 1),
+                        "room": v.get("room", ""),
+                        "building": _normalize_int(v.get("building"))
+                    }
                 else:
-                    normalized[k] = {"shift": v, "room": ""}
+                    normalized[k] = {
+                        "shift": _normalize_int(v, 1),
+                        "room": "",
+                        "building": None
+                    }
             return normalized
     except Exception as e:
         print(f"Ошибка загрузки смен: {e}")
@@ -177,11 +192,11 @@ async def load_schedule_to_db():
     for group, schedule in data.items():
         # Добавляем кабинеты из group_shifts.json
         schedule_with_classrooms = add_classrooms_to_schedule(schedule, group, shifts)
-        
+
         await db.schedules.insert_one({
             "group_name": group,
             "schedule": schedule_with_classrooms,
-            "shift_info": shifts.get(group, {"shift": 1}),
+            "shift_info": shifts.get(group, {"shift": 1, "room": "", "building": None}),
             "updated_at": datetime.now()
         })
     print(f"✅ Залито расписание для {len(data)} групп в MongoDB")

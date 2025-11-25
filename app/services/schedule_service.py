@@ -74,6 +74,7 @@ class ScheduleService:
         """
         Загружает файл .docx, парсит его и сохраняет расписания в MongoDB.
         Если передан также файл group_shifts.json — он обновляется вместе с расписанием.
+        Формат файла: {"GROUP": {"shift": 1, "room": "101", "building": 1}}.
         Старые записи полностью очищаются.
         """
         import os, json
@@ -118,7 +119,7 @@ class ScheduleService:
             second_shift_count = 0
 
             for group, schedule in data.items():
-                shift_info = shifts.get(group, {"shift": 1})
+                shift_info = shifts.get(group, {"shift": 1, "room": "", "building": None})
                 shift_num = shift_info.get("shift", 1)
                 if shift_num == 1:
                     first_shift_count += 1

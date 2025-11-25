@@ -51,6 +51,7 @@ async def get_schedule(
     description=(
         "Принимает DOCX-файл с расписанием и сохраняет его в базу данных. "
         "Опционально можно прикрепить JSON-файл со сменами (`group_shifts.json`). "
+        "Файл должен содержать для каждой группы поля `shift`, `room` и `building`." \
         "Перед загрузкой старое расписание полностью очищается."
     ),
     response_description="Информация о загруженных расписаниях и количестве групп."
@@ -62,7 +63,7 @@ async def upload_schedule(
     ),
     shifts_file: UploadFile | None = File(
         None,
-        description="Необязательно: JSON-файл со сменами и кабинетами."
+        description="Необязательно: JSON-файл со сменами, кабинетами и корпусом."
     )
 ):
     return await ScheduleService.upload_schedule(schedule_file, shifts_file)
