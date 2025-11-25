@@ -18,3 +18,27 @@ Provide a JSON object where each key is a group name and the value describes its
 * `building` — campus/building number (for example, 1 or 2). If omitted, it is stored as `null`.
 
 The `group_shifts.json` file is optional, but including `building` ensures the field is available in API responses under `shift_info`.
+
+## Bell schedule JSON format
+
+Bell data is stored with a building layer so the same shift can have different times per campus:
+
+```json
+{
+  "понедельник": {
+    "1": {
+      "1_shift": {"1": "09:00–09:45", "2": "09:55–10:40"}
+    },
+    "2": {
+      "1_shift": {"1": "10:10–10:55", "2": "11:05–11:50"}
+    },
+    "default": {
+      "1_shift": {"1": "08:30–09:15", "2": "09:25–10:10"}
+    }
+  }
+}
+```
+
+* The path is `bell_schedule[day][building_key][shift_key][lesson_number]`.
+* `building_key` is a stringified building number (e.g., `"1"`) or `"default"` for campus-agnostic times.
+* When a building-specific block is missing, the backend falls back to the `default` block for that day.

@@ -17,7 +17,7 @@ async def upload_bell_schedule(file: UploadFile = File(...)):
 
     try:
         content = await file.read()
-        bell_data = json.loads(content)
+        bell_data = _normalize_bell_data(json.loads(content))
 
         with open(MAIN_BELL_FILE, "w", encoding="utf-8") as f:
             json.dump(bell_data, f, ensure_ascii=False, indent=2)
@@ -36,8 +36,9 @@ async def upload_special_bell_schedule(file: UploadFile = File(...)):
     Принимает JSON в формате:
     {
       "среда": {
-        "1_shift": {"1": "09:00–10:00", "2": "10:10–11:10"},
-        "2_shift": {"1": "11:30–12:30", "2": "12:40–13:40"}
+        "1": {"1_shift": {"1": "09:00–10:00", "2": "10:10–11:10"}},
+        "2": {"1_shift": {"1": "10:10–11:10", "2": "11:20–12:20"}},
+        "default": {"1_shift": {"1": "08:30–09:30", "2": "09:40–10:40"}}
       }
     }
     """
@@ -46,7 +47,7 @@ async def upload_special_bell_schedule(file: UploadFile = File(...)):
 
     try:
         content = await file.read()
-        override_data = json.loads(content)
+        override_data = _normalize_bell_data(json.loads(content))
 
         with open(OVERRIDE_FILE, "w", encoding="utf-8") as f:
             json.dump(override_data, f, ensure_ascii=False, indent=2)
@@ -64,11 +65,46 @@ async def upload_special_bell_schedule(file: UploadFile = File(...)):
 
 
 # === 🔧 Общая функция обновления всех расписаний ===
+def _normalize_bell_data(raw_data: dict) -> dict:
+    """
+    Унифицирует схему расписания звонков до формата
+    bell_schedule[day][building_key][shift_key] -> {lesson_num: time}.
+
+    * Если на уровне дня сразу лежат ключи `1_shift`, `2_shift` и т.п.,
+      оборачиваем их в building_key = "default".
+    * building_key приводится к str, чтобы числа/None сохранялись единообразно.
+    """
+    normalized: dict[str, dict] = {}
+
+    for day_key, day_payload in (raw_data or {}).items():
+        if not isinstance(day_payload, dict):
+            continue
+
+        # Старый формат: {"1_shift": {...}, "2_shift": {...}}
+        if any(k.endswith("_shift") for k in day_payload.keys()):
+            normalized[day_key] = {"default": day_payload}
+            continue
+
+        # Новый формат с корпусами
+        building_map: dict[str, dict] = {}
+        for building_key, building_payload in day_payload.items():
+            if not isinstance(building_payload, dict):
+                continue
+            building_str = "default" if building_key in (None, "") else str(building_key)
+            building_map[building_str] = building_payload
+
+        normalized[day_key] = building_map
+
+    return normalized
+
+
 async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = None):
     """
     Обновляет все расписания в БД, добавляя поле 'time' по расписанию звонков.
     Поддерживает оба варианта ключей: 'вторник-четверг' и 'вторник_четверг'.
     """
+    normalized_bells = _normalize_bell_data(bell_data)
+    allowed_days = [normalize_day_name(day) for day in only_days] if only_days else None
     schedules = await db.schedules.find().to_list(None)
     updated_count = 0
 
@@ -86,7 +122,7 @@ async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = N
                 normalized_day = normalize_day_name(day_name)
 
                 # если обновляем только определённые дни
-                if only_days and normalized_day not in only_days:
+                if allowed_days and normalized_day not in allowed_days:
                     continue
 
                 # определяем ключ для звонков
@@ -94,16 +130,28 @@ async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = N
                 if normalized_day in ["вторник", "среда", "четверг"]:
                     key = "вторник-четверг"
 
-                # fallback: если ключ с дефисом не найден — пробуем с подчёркиванием
-                if key not in bell_data:
+                day_block = normalized_bells.get(key)
+                if not day_block:
                     alt_key = key.replace("-", "_")
-                    if alt_key in bell_data:
-                        key = alt_key
+                    day_block = normalized_bells.get(alt_key)
+
+                if not day_block:
+                    continue
+
+                building = shift_info.get("building")
+                building_key = "default" if building in (None, "") else str(building)
+                building_block = day_block.get(building_key) or day_block.get("default")
+
+                if not building_block:
+                    continue
 
                 shift_key = f"{shift}_shift"
-                bell_times = bell_data.get(key, {}).get(shift_key, {})
+                bell_times = building_block.get(shift_key, {})
 
-                # если всё равно не нашли — пропускаем
+                if not bell_times:
+                    default_block = day_block.get("default", {})
+                    bell_times = default_block.get(shift_key, {})
+
                 if not bell_times:
                     continue
 
