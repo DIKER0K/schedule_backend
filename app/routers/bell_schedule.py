@@ -3,14 +3,16 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from app.database import db
 from app.utils.common import normalize_day_name
 
-router = APIRouter(prefix="/bell", tags=["Расписание звонков"])
+router = APIRouter()
 
 MAIN_BELL_FILE = "bell_schedule.json"
 OVERRIDE_FILE = "bell_schedule_overrides.json"
 
 
 # === 1️⃣ Базовая загрузка (основное расписание) ===
-@router.post("/upload", summary="Загрузить основное расписание звонков и обновить все пары")
+@router.post(
+    "/upload", summary="Загрузить основное расписание звонков и обновить все пары"
+)
 async def upload_bell_schedule(file: UploadFile = File(...)):
     if not file.filename.endswith(".json"):
         raise HTTPException(status_code=400, detail="Нужен JSON-файл")
@@ -23,14 +25,19 @@ async def upload_bell_schedule(file: UploadFile = File(...)):
             json.dump(bell_data, f, ensure_ascii=False, indent=2)
 
         updated_count = await _update_all_schedules(bell_data)
-        return {"message": f"✅ Обновлено расписаний: {updated_count} (основное)", "file_saved": True}
+        return {
+            "message": f"✅ Обновлено расписаний: {updated_count} (основное)",
+            "file_saved": True,
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка при обработке: {e}")
 
 
 # === 2️⃣ Загрузка частичного расписания для конкретного дня ===
-@router.post("/upload/special", summary="Загрузить расписание звонков для конкретных дней")
+@router.post(
+    "/upload/special", summary="Загрузить расписание звонков для конкретных дней"
+)
 async def upload_special_bell_schedule(file: UploadFile = File(...)):
     """
     Принимает JSON в формате:
@@ -52,7 +59,9 @@ async def upload_special_bell_schedule(file: UploadFile = File(...)):
             json.dump(override_data, f, ensure_ascii=False, indent=2)
 
         # обновляем расписания только для указанных дней
-        updated_count = await _update_all_schedules(override_data, only_days=list(override_data.keys()))
+        updated_count = await _update_all_schedules(
+            override_data, only_days=list(override_data.keys())
+        )
 
         return {
             "message": f"✅ Обновлено расписаний: {updated_count} (специальные дни: {', '.join(override_data.keys())})",
@@ -118,8 +127,7 @@ async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = N
 
         if modified:
             await db.schedules.update_one(
-                {"group_name": group_name},
-                {"$set": {"schedule": schedule}}
+                {"group_name": group_name}, {"$set": {"schedule": schedule}}
             )
             updated_count += 1
 
