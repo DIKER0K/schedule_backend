@@ -33,41 +33,88 @@ def normalize_teacher_name(name: str):
     return f"{fam} {ini}"
 
 def parse_lesson_info_fixed(cell_text: str):
-    text = re.sub(r'\s+', ' ', cell_text.strip())
-    if not text or text == '##':
-        return None
-    if len(text) < 2 or re.match(r'^\d+$', text):
+    """
+    Парсит предмет, преподавателя и кабинет из ячейки DOCX.
+    Учитывает:
+    - МДК 07.01 ...
+    - кабинет рядом с преподавателем
+    """
+
+    if not cell_text:
         return None
 
-    teacher_match = re.search(r'([А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\.?)$', text)
-    teacher = teacher_match.group(1) if teacher_match else ''
-    subject = re.sub(r'\s*' + re.escape(teacher) + r'\s*$', '', text).strip() if teacher else text
+    # сохраняем переносы строк
+    lines = [l.strip() for l in cell_text.split("\n") if l.strip()]
+    text = " ".join(lines)
+
+    if not text or text == "##":
+        return None
+
+    teacher = None
+    classroom = None
+
+    # --- ищем преподавателя ---
+    teacher_match = re.search(
+        r'([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+[А-ЯЁ]\.[А-ЯЁ]\.?)',
+        text
+    )
+
+    if teacher_match:
+        teacher = teacher_match.group(1)
+
+        # ищем кабинет рядом с преподавателем
+        after_teacher = text[teacher_match.end():]
+
+        room_match = re.search(r'\b\d{2,3}\b', after_teacher)
+        if room_match:
+            classroom = room_match.group(0)
+
+    # --- предмет ---
+    subject = text
+
+    if teacher:
+        subject = subject.replace(teacher, "")
+
+    if classroom:
+        subject = subject.replace(classroom, "")
+
+    subject = re.sub(r'\s+', ' ', subject).strip()
+
+    # если кабинет всё ещё внутри subject — убираем
+    if subject and classroom:
+        subject = re.sub(rf'\b{classroom}\b', '', subject).strip()
+
+    if not teacher:
+        print("⚠ Не найден преподаватель:", cell_text)
 
     return {
-        "subject": subject or text,
+        "subject": subject if subject else None,
         "teacher": teacher,
-        "classroom": ""  # Кабинет будет добавлен из group_shifts.json
+        "classroom": classroom
     }
 
 def add_classrooms_to_schedule(schedule: dict, group_name: str, shifts: dict):
-    """Добавляет кабинеты из group_shifts.json к урокам в расписании"""
+    """
+    Добавляет кабинеты из group_shifts.json,
+    НО только если они отсутствуют в расписании.
+    """
+
     group_shift = shifts.get(group_name, {})
-    classroom = group_shift.get("room", "")
-    
-    if not classroom or classroom == "":
+    classroom = group_shift.get("room")
+
+    if not classroom:
         return schedule
-    
-    # Добавляем кабинет к нулевому уроку
+
     for day in schedule["zero_lesson"]:
-        if schedule["zero_lesson"][day]:
-            schedule["zero_lesson"][day]["classroom"] = classroom
-    
-    # Добавляем кабинет к обычным урокам
+        lesson = schedule["zero_lesson"][day]
+        if lesson and not lesson.get("classroom"):
+            lesson["classroom"] = classroom
+
     for day in schedule["days"]:
-        for lesson_num in schedule["days"][day]:
-            if schedule["days"][day][lesson_num]:
-                schedule["days"][day][lesson_num]["classroom"] = classroom
-    
+        for lesson_num, lesson in schedule["days"][day].items():
+            if lesson and not lesson.get("classroom"):
+                lesson["classroom"] = classroom
+
     return schedule
 
 def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
