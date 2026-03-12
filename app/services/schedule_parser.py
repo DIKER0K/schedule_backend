@@ -197,6 +197,7 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
                     )
 
         # Записываем найденные уроки в словарь расписания
+        # Записываем найденные уроки в словарь расписания
         for day, entries in day_entries.items():
             if lesson_num == "0":
                 if entries:
@@ -208,49 +209,55 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
                 if len(entries) == 1:
                     schedules[group_name]["days"][day][lesson_num] = entries[0]["info"]
                 else:
-                    # Разные предметы в одной строке (подгруппы, например Англ/Родной язык)
+                    # Разные предметы в одной строке (подгруппы) -> 1.1, 1.2
                     for i, entry in enumerate(entries, 1):
                         lesson_key = f"{lesson_num}.{i}"
                         schedules[group_name]["days"][day][lesson_key] = entry["info"]
 
-            # Сценарий 2: У пары несколько строк (обычно 2) - могут быть половинки
+            # Сценарий 2: У пары несколько строк (2 или более) - потенциальные половинки
             else:
-                sig_to_subrows = defaultdict(list)
-                for entry in entries:
-                    sig_to_subrows[entry["sig"]].append(entry["subrow_idx"])
+                # 1. Группируем записи по физическим строкам (половинкам)
+                entries_by_subrow = defaultdict(list)
+                for e in entries:
+                    entries_by_subrow[e["subrow_idx"]].append(e)
 
-                # Если предмет ровно один и дублируется во всех под-строках -> это целая пара
-                if (
-                    len(sig_to_subrows) == 1
-                    and len(list(sig_to_subrows.values())[0]) == num_subrows
-                ):
-                    schedules[group_name]["days"][day][lesson_num] = entries[0]["info"]
+                # 2. Проверка: если одна сигнатура занимает ВСЕ строки пары (целая пара)
+                sig_counts = defaultdict(int)
+                for e in entries:
+                    sig_counts[e["sig"]] += 1
+
+                full_lesson_info = None
+                for sig, count in sig_counts.items():
+                    if count == num_subrows:
+                        # Находим объект инфо для этой сигнатуры
+                        full_lesson_info = next(
+                            e["info"] for e in entries if e["sig"] == sig
+                        )
+                        break
+
+                if full_lesson_info:
+                    # Если предмет дублируется во всех строках — записываем как целую пару
+                    schedules[group_name]["days"][day][lesson_num] = full_lesson_info
                 else:
-                    # Половинки или пустые окна
-                    for sig, subrows in sig_to_subrows.items():
-                        info = None
-                        for e in entries:
-                            if e["sig"] == sig:
-                                info = e["info"]
-                                break
+                    # 3. Иначе обрабатываем каждую половинку отдельно
+                    for sub_idx in range(num_subrows):
+                        row_entries = entries_by_subrow.get(sub_idx, [])
+                        if not row_entries:
+                            continue
 
-                        if len(subrows) == num_subrows:
-                            schedules[group_name]["days"][day][lesson_num] = info
+                        # Базовый ключ для половинки: 1.1, 1.2
+                        base_key = f"{lesson_num}.{sub_idx + 1}"
+
+                        if len(row_entries) == 1:
+                            # Одна запись в половинке (например, общая пара в первой половине)
+                            schedules[group_name]["days"][day][base_key] = row_entries[
+                                0
+                            ]["info"]
                         else:
-                            # Урок идет только в конкретной половинке (subrow 0 -> .1, subrow 1 -> .2)
-                            for subrow_idx in subrows:
-                                base_key = f"{lesson_num}.{subrow_idx + 1}"
-                                key = base_key
-                                counter = 1
-                                # Защита от перезаписи, если в одной половинке две подгруппы
-                                while key in schedules[group_name]["days"][day]:
-                                    existing = schedules[group_name]["days"][day][key]
-                                    if existing == info:
-                                        break
-                                    key = f"{base_key}.{counter}"
-                                    counter += 1
-
-                                schedules[group_name]["days"][day][key] = info
+                            # Несколько записей в одной половинке (подгруппы) -> 1.2.1, 1.2.2
+                            for sub_grp_idx, e in enumerate(row_entries, 1):
+                                key = f"{base_key}.{sub_grp_idx}"
+                                schedules[group_name]["days"][day][key] = e["info"]
 
     print(f"--- [ТАБЛИЦА] Конец парсинга для группы: {group_name} ---\n")
 
