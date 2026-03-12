@@ -152,8 +152,14 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
     print(f"[ДНИ] Итоговая карта дней: {day_columns}")
 
     # === ПЕРВЫЙ ПРОХОД: Собираем все данные временно ===
-    # Структура: {day: {lesson_num: [(row_idx, lesson_info), ...]}}
     temp_schedule = defaultdict(lambda: defaultdict(list))
+
+    # ИСПРАВЛЕНИЕ: Теперь храним СПИСОК записей для каждого signature
+    # (day, subject, teacher, classroom) -> [(row_idx, lesson_num, lesson_info, is_merged), ...]
+    seen_cells = defaultdict(list)
+
+    # Отслеживаем ТОЛЬКО реально объединённые ячейки
+    merged_cells = set()
 
     for r_idx, r in enumerate(rows[1:], 1):
         cells = [c.text.strip() for c in r.cells]
@@ -181,58 +187,106 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
 
             if lesson_info:
                 print(f"  -> [УРОК] Распознано: {lesson_info}")
-                # Сохраняем временно с номером строки
-                temp_schedule[day][lesson_num].append((r_idx, lesson_info))
+
+                cell_signature = (
+                    day,
+                    lesson_info.get("subject"),
+                    lesson_info.get("teacher"),
+                    lesson_info.get("classroom"),
+                )
+
+                # Проверяем есть ли уже записи с этим signature
+                existing_entries = seen_cells[cell_signature]
+
+                if existing_entries:
+                    # Берем последнюю запись для этого signature
+                    prev_row_idx, prev_lesson_num, _, prev_is_merged = existing_entries[
+                        -1
+                    ]
+
+                    # ИСПРАВЛЕНИЕ: Объединённая ячейка только если номер пары НЕ изменился
+                    if int(lesson_num) == int(prev_lesson_num):
+                        # Одинаковые номера = объединённая ячейка
+                        print(
+                            f"  [ОБЪЕДИНЁННАЯ] Ячейка охватывает строки {prev_row_idx}-{r_idx}, номер пары {lesson_num}"
+                        )
+                        merged_cells.add(cell_signature)
+                        # Обновляем последнюю запись
+                        existing_entries[-1] = (r_idx, lesson_num, lesson_info, True)
+                    # ИСПРАВЛЕНИЕ: Если номер пары изменился - это разные занятия!
+                    elif int(lesson_num) > int(prev_lesson_num):
+                        print(
+                            f"  [РАЗНЫЕ ПАРЫ] Номер изменился {prev_lesson_num} -> {lesson_num}, добавляем новую запись"
+                        )
+                        # ДОБАВЛЯЕМ новую запись, не перезаписываем!
+                        existing_entries.append((r_idx, lesson_num, lesson_info, False))
+                    else:
+                        print(
+                            f"  [ПРОПУСК] Дубликат (номер {lesson_num} < {prev_lesson_num})"
+                        )
+                else:
+                    # Первая запись для этого signature
+                    seen_cells[cell_signature].append(
+                        (r_idx, lesson_num, lesson_info, False)
+                    )
+
+    # Переносим в temp_schedule
+    for cell_signature, entries in seen_cells.items():
+        day, subject, teacher, classroom = cell_signature
+
+        # is_merged=True ТОЛЬКО если ячейка была в merged_cells
+        is_merged = cell_signature in merged_cells
+
+        for row_idx, lesson_num, lesson_info, _ in entries:
+            temp_schedule[day][lesson_num].append((row_idx, lesson_info, is_merged))
+            print(f"[TEMP] {day} пара {lesson_num}: {subject} (merged={is_merged})")
 
     # === ВТОРОЙ ПРОХОД: Определяем подпары и сохраняем ===
     for day, lessons in temp_schedule.items():
         for lesson_num, lesson_list in lessons.items():
             if lesson_num == "0":
-                # Нулевая пара - всегда одна
                 if lesson_list:
                     schedules[group_name]["zero_lesson"][day] = lesson_list[0][1]
                 continue
 
-            # Сортируем по номеру строки
             lesson_list.sort(key=lambda x: x[0])
 
             print(f"\n[АНАЛИЗ] {day}, пара {lesson_num}: {len(lesson_list)} записей")
 
             if len(lesson_list) == 1:
-                # Только одна запись - проверяем, есть ли в других строках с этим номером
-                # Если строка не последняя для этого номера - это первая половинка
-                row_idx, lesson_info = lesson_list[0]
+                row_idx, lesson_info, is_merged = lesson_list[0]
 
-                # Проверяем, есть ли другие строки с этим номером пары в другие дни
-                has_second_half = False
-                for other_day, other_lessons in temp_schedule.items():
-                    if other_day == day:
-                        continue
-                    if (
-                        lesson_num in other_lessons
-                        and len(other_lessons[lesson_num]) > 1
-                    ):
-                        has_second_half = True
-                        break
-
-                # Если в ЭТОМ дне только одна запись, но в других днях есть две -
-                # значит это половинка
-                if has_second_half:
-                    lesson_key = f"{lesson_num}.1"
-                    print(f"  [ПОЛОВИНКА] {day} {lesson_num} -> {lesson_key}")
-                else:
+                # Если это объединённая ячейка - она ЦЕЛАЯ
+                if is_merged:
                     lesson_key = lesson_num
-                    print(f"  [ЦЕЛАЯ] {day} {lesson_num} -> {lesson_key}")
+                    print(f"  [ЦЕЛАЯ из merged] {day} {lesson_num} -> {lesson_key}")
+                    schedules[group_name]["days"][day][lesson_key] = lesson_info
+                else:
+                    # Проверяем, есть ли другие дни с двумя записями
+                    has_second_half = False
+                    for other_day, other_lessons in temp_schedule.items():
+                        if other_day == day:
+                            continue
+                        if (
+                            lesson_num in other_lessons
+                            and len(other_lessons[lesson_num]) > 1
+                        ):
+                            has_second_half = True
+                            break
 
-                schedules[group_name]["days"][day][lesson_key] = lesson_info
+                    if has_second_half:
+                        lesson_key = f"{lesson_num}.1"
+                        print(f"  [ПОЛОВИНКА] {day} {lesson_num} -> {lesson_key}")
+                    else:
+                        lesson_key = lesson_num
+                        print(f"  [ЦЕЛАЯ] {day} {lesson_num} -> {lesson_key}")
+
+                    schedules[group_name]["days"][day][lesson_key] = lesson_info
 
             else:
-                # Несколько записей в одном дне - это подпары
-                for i, (row_idx, lesson_info) in enumerate(lesson_list, 1):
-                    if i == 1:
-                        lesson_key = lesson_num
-                    else:
-                        lesson_key = f"{lesson_num}.{i}"
+                # Несколько записей в одном дне - подпары
+                for i, (row_idx, lesson_info, is_merged) in enumerate(lesson_list, 1):
+                    lesson_key = f"{lesson_num}.{i}"
 
                     print(f"  [ПОДПАРА] {day} {lesson_key} (строка {row_idx})")
                     schedules[group_name]["days"][day][lesson_key] = lesson_info
