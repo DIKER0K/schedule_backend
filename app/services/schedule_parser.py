@@ -155,6 +155,9 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
     # Структура: {day: {lesson_num: [(row_idx, lesson_info), ...]}}
     temp_schedule = defaultdict(lambda: defaultdict(list))
 
+    # Для отслеживания объединённых ячеек
+    seen_cells = set()  # (day, subject, teacher, classroom)
+
     for r_idx, r in enumerate(rows[1:], 1):
         cells = [c.text.strip() for c in r.cells]
 
@@ -181,6 +184,21 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
 
             if lesson_info:
                 print(f"  -> [УРОК] Распознано: {lesson_info}")
+
+                # Проверяем, не дубликат ли это из-за merged cells
+                cell_signature = (
+                    day,
+                    lesson_info.get("subject"),
+                    lesson_info.get("teacher"),
+                    lesson_info.get("classroom"),
+                )
+
+                if cell_signature in seen_cells:
+                    print("  [ПРОПУСК] Дубликат объединённой ячейки")
+                    continue
+
+                seen_cells.add(cell_signature)
+
                 # Сохраняем временно с номером строки
                 temp_schedule[day][lesson_num].append((r_idx, lesson_info))
 
@@ -200,7 +218,6 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
 
             if len(lesson_list) == 1:
                 # Только одна запись - проверяем, есть ли в других строках с этим номером
-                # Если строка не последняя для этого номера - это первая половинка
                 row_idx, lesson_info = lesson_list[0]
 
                 # Проверяем, есть ли другие строки с этим номером пары в другие дни
