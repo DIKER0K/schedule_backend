@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Body, HTTPException, Query
 from app.database import db
-from app.models.user import User
+from app.models.user import User, UserStats
 
 router = APIRouter()
 
@@ -17,6 +17,86 @@ async def get_users(
 ):
     users = await db.users.find().skip(skip).limit(limit).to_list(length=limit)
     return users
+
+
+@router.get("/platform/{platform}", response_model=list[User])
+async def get_users_by_platform(
+    platform: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, gt=0, le=1000),
+):
+    users = (
+        await db.users.find({"platform": platform})
+        .skip(skip)
+        .limit(limit)
+        .to_list(length=limit)
+    )
+    return users
+
+
+@router.get("/group/{platform}/{group_name}", response_model=list[User])
+async def get_users_by_group(platform: str, group_name: str):
+
+    users = await db.users.find(
+        {
+            "platform": platform,
+            "group_name": group_name,
+        }
+    ).to_list(length=10000)
+
+    return users
+
+
+@router.get("/stats/{platform}", response_model=UserStats)
+async def get_user_stats(platform: str):
+
+    pipeline = [
+        {"$match": {"platform": platform}},
+        {
+            "$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "students": {"$sum": {"$cond": [{"$eq": ["$role", "student"]}, 1, 0]}},
+                "teachers": {"$sum": {"$cond": [{"$eq": ["$role", "teacher"]}, 1, 0]}},
+                "admins": {"$sum": {"$cond": [{"$eq": ["$role", "admin"]}, 1, 0]}},
+                "subscriptions": {"$sum": {"$cond": ["$schedule_enabled", 1, 0]}},
+                "groups": {"$addToSet": "$group_name"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "total": 1,
+                "students": 1,
+                "teachers": 1,
+                "admins": 1,
+                "subscriptions": 1,
+                "groups": {
+                    "$size": {
+                        "$filter": {
+                            "input": "$groups",
+                            "as": "g",
+                            "cond": {"$ne": ["$$g", None]},
+                        }
+                    }
+                },
+            }
+        },
+    ]
+
+    result = await db.users.aggregate(pipeline).to_list(length=1)
+
+    if not result:
+        return {
+            "total": 0,
+            "students": 0,
+            "teachers": 0,
+            "admins": 0,
+            "groups": 0,
+            "subscriptions": 0,
+        }
+
+    return result[0]
 
 
 @router.get("/{platform}/{user_id}", response_model=User)
