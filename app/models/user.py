@@ -3,6 +3,7 @@ from typing import Optional
 
 class User(BaseModel):
     user_id: int = Field(..., unique=True)
+    platform: str = Field(default="telegram")
     username: Optional[str] = None
     role: str = Field(default="student")
     group_name: Optional[str] = None
