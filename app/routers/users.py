@@ -4,50 +4,51 @@ from app.models.user import User
 
 router = APIRouter()
 
+
 @router.get("/", response_model=list[User])
 async def get_users(
     skip: int = Query(0, ge=0, description="Количество пропущенных записей"),
-    limit: int = Query(100, gt=0, le=1000, description="Количество записей для получения (по умолчанию 100, максимум 1000)")
+    limit: int = Query(
+        100,
+        gt=0,
+        le=1000,
+        description="Количество записей для получения (по умолчанию 100, максимум 1000)",
+    ),
 ):
     users = await db.users.find().skip(skip).limit(limit).to_list(length=limit)
     return users
 
+
 @router.get("/{platform}/{user_id}", response_model=User)
 async def get_user(platform: str, user_id: int):
-    user = await db.users.find_one({
-        "user_id": user_id,
-        "platform": platform
-    })
+    user = await db.users.find_one({"user_id": user_id, "platform": platform})
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     return user
 
+
 # ✅ обновляем частично
 @router.put("/{platform}/{user_id}", response_model=User)
 async def update_user(platform: str, user_id: int, data: dict = Body(...)):
     result = await db.users.update_one(
-        {"user_id": user_id, "platform": platform},
-        {"$set": data}
+        {"user_id": user_id, "platform": platform}, {"$set": data}
     )
 
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
 
-    updated = await db.users.find_one({
-        "user_id": user_id,
-        "platform": platform
-    })
+    updated = await db.users.find_one({"user_id": user_id, "platform": platform})
 
     return updated
 
+
 @router.post("/", response_model=User)
 async def create_user(user: User):
-    existing = await db.users.find_one({
-        "user_id": user.user_id,
-        "platform": user.platform
-    })
+    existing = await db.users.find_one(
+        {"user_id": user.user_id, "platform": user.platform}
+    )
 
     if existing:
         raise HTTPException(status_code=400, detail="User already exists")
@@ -55,14 +56,26 @@ async def create_user(user: User):
     await db.users.insert_one(user.dict())
     return user
 
+
 @router.delete("/{platform}/{user_id}")
 async def delete_user(platform: str, user_id: int):
-    result = await db.users.delete_one({
-        "user_id": user_id,
-        "platform": platform
-    })
+    result = await db.users.delete_one({"user_id": user_id, "platform": platform})
 
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
 
     return {"message": "User deleted successfully"}
+
+
+@router.get("/schedule/send/{platform}/{time}", response_model=list[User])
+async def get_users_for_schedule(platform: str, time: str):
+
+    users = await db.users.find(
+        {
+            "platform": platform,
+            "schedule_enabled": True,
+            "schedule_time": time,
+        }
+    ).to_list(length=10000)
+
+    return users

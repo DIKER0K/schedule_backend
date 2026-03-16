@@ -4,3 +4,4 @@ python-docx
 python-decouple
 uvicorn
 python-multipart
+openai
