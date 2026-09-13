@@ -276,7 +276,7 @@ def parse_schedule_from_docx(file_path: str):
         if not text:
             continue
 
-        group_match = re.search(r"Расписание уроков\s+для\s+(.+?)\s+группы", text)
+        group_match = re.search(r"Расписание уроков\s+для\s+(.+?)\s*группы", text)
         if group_match:
             current_group = group_match.group(1).strip()
             print(f"[ГРУППА] Найдена группа '{current_group}' в параграфе {p_idx}")
