@@ -14,6 +14,7 @@ from app.services.schedule_parser import (
     parse_schedule_from_docx,
 )
 from app.utils.common import normalize_day_name, normalize_name, serialize_doc
+from app.services.bell_service import apply_bell_schedule_from_files
 
 
 class ScheduleService:
@@ -184,6 +185,8 @@ class ScheduleService:
                 }
                 result = await db.schedules.insert_one(doc)
                 inserted.append(str(result.inserted_id))
+
+            await apply_bell_schedule_from_files()
 
             return UploadResponse(
                 message=(
