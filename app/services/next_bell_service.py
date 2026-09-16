@@ -1,36 +1,11 @@
-import json
-import os
 from datetime import datetime
-from typing import Optional
-
+from app.database import db
 from app.models.next_bell import (
     CurrentEvent,
     EventType,
     NextBellInfo,
     NextBellResponse,
 )
-
-MAIN_BELL_FILE = "bell_schedule.json"
-OVERRIDE_FILE = "bell_schedule_overrides.json"
-
-DAY_MAP = {
-    "понедельник": "понедельник",
-    "вторник": "вторник-четверг",
-    "среда": "вторник-четверг",
-    "четверг": "вторник-четверг",
-    "пятница": "пятница",
-    "суббота": "суббота",
-}
-
-DAY_NAMES_RU = [
-    "Понедельник",
-    "Вторник",
-    "Среда",
-    "Четверг",
-    "Пятница",
-    "Суббота",
-    "Воскресенье",
-]
 
 WEEKDAY_TO_RU = {
     0: "Понедельник",
@@ -43,15 +18,8 @@ WEEKDAY_TO_RU = {
 }
 
 
-def _load_json(path: str) -> Optional[dict]:
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def _parse_time(t: str) -> tuple[int, int]:
-    t = t.strip().replace("–", "-").replace("—", "-")
+    t = t.strip().replace("–", "-").replace("—", "-").replace("\u2013", "-")
     parts = t.split("-")
     h, m = parts[0].strip().split(":")
     return int(h), int(m)
@@ -66,50 +34,33 @@ def _minutes_to_time(minutes: int) -> str:
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
-def _get_bell_key(day_ru: str) -> Optional[str]:
-    return DAY_MAP.get(day_ru.lower())
-
-
-def _get_bell_schedule_for_today(day_ru: str) -> dict:
-    main = _load_json(MAIN_BELL_FILE)
-    overrides = _load_json(OVERRIDE_FILE)
-
-    bell_key = _get_bell_key(day_ru)
-    if not bell_key:
-        return {}
-
-    schedule = {}
-    if main and bell_key in main:
-        schedule = main[bell_key]
-    if overrides and day_ru.lower() in overrides:
-        schedule = {**schedule, **overrides[day_ru.lower()]}
-
-    return schedule
-
-
-def _build_timeline(bell_times: dict) -> list[dict]:
-    lessons = []
-    for num, time_str in bell_times.items():
-        if not time_str or "-" not in time_str and "–" not in time_str:
+def _build_timeline(lessons: dict) -> list[dict]:
+    parsed = []
+    for num, lesson_data in lessons.items():
+        time_str = lesson_data.get("time") if isinstance(lesson_data, dict) else None
+        if not time_str:
             continue
-        clean = time_str.strip().replace("–", "-").replace("—", "-")
+        clean = time_str.strip().replace("–", "-").replace("—", "-").replace("\u2013", "-")
         parts = clean.split("-")
         if len(parts) != 2:
             continue
-        start_min = _time_to_minutes(parts[0])
-        end_min = _time_to_minutes(parts[1])
-        lessons.append({
-            "number": num,
+        try:
+            start_min = _time_to_minutes(parts[0])
+            end_min = _time_to_minutes(parts[1])
+        except (ValueError, IndexError):
+            continue
+        parsed.append({
+            "number": str(num),
             "start": start_min,
             "end": end_min,
             "start_str": parts[0].strip(),
             "end_str": parts[1].strip(),
         })
 
-    lessons.sort(key=lambda x: (x["start"], x["number"]))
+    parsed.sort(key=lambda x: (x["start"], x["number"]))
 
     timeline = []
-    for i, lesson in enumerate(lessons):
+    for i, lesson in enumerate(parsed):
         timeline.append({
             "type": "lesson",
             "number": lesson["number"],
@@ -118,8 +69,8 @@ def _build_timeline(bell_times: dict) -> list[dict]:
             "start_str": lesson["start_str"],
             "end_str": lesson["end_str"],
         })
-        if i + 1 < len(lessons):
-            next_lesson = lessons[i + 1]
+        if i + 1 < len(parsed):
+            next_lesson = parsed[i + 1]
             if lesson["end"] < next_lesson["start"]:
                 timeline.append({
                     "type": "break",
@@ -133,24 +84,38 @@ def _build_timeline(bell_times: dict) -> list[dict]:
     return timeline
 
 
-def get_next_bell() -> NextBellResponse:
+async def _get_today_lessons() -> dict:
+    today = WEEKDAY_TO_RU[datetime.now().weekday()]
+
+    schedule_doc = await db.schedules.find_one(
+        {"shift_info.shift": 1, f"schedule.days.{today}": {"$exists": True, "$ne": {}}}
+    )
+    if not schedule_doc:
+        schedule_doc = await db.schedules.find_one(
+            {"schedule.days.{today}": {"$exists": True, "$ne": {}}}
+        )
+    if not schedule_doc:
+        return {}
+
+    return schedule_doc.get("schedule", {}).get("days", {}).get(today, {})
+
+
+async def get_next_bell() -> NextBellResponse:
     now = datetime.now()
     current_day = WEEKDAY_TO_RU[now.weekday()]
     current_time_str = now.strftime("%H:%M")
     current_minutes = now.hour * 60 + now.minute
 
-    bell_schedule = _get_bell_schedule_for_today(current_day)
-    shift_key = "1_shift"
-    bell_times = bell_schedule.get(shift_key, {})
+    lessons = await _get_today_lessons()
 
-    if not bell_times:
+    if not lessons:
         return NextBellResponse(
             current_time=current_time_str,
             current_day=current_day,
             current_event=CurrentEvent(type=EventType.no_classes),
         )
 
-    timeline = _build_timeline(bell_times)
+    timeline = _build_timeline(lessons)
 
     if not timeline:
         return NextBellResponse(
@@ -166,15 +131,11 @@ def get_next_bell() -> NextBellResponse:
         return NextBellResponse(
             current_time=current_time_str,
             current_day=current_day,
-            current_event=CurrentEvent(
-                type=EventType.no_classes,
-                start=_minutes_to_time(first_start),
-                end=timeline[0]["start_str"],
-            ),
+            current_event=CurrentEvent(type=EventType.no_classes),
             next_bell=NextBellInfo(
                 time=timeline[0]["start_str"],
-                type=EventType.lesson if timeline[0]["type"] == "lesson" else EventType.break_,
-                lesson_number=timeline[0].get("number"),
+                type=EventType.lesson,
+                lesson_number=timeline[0]["number"],
             ),
         )
 

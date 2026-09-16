@@ -7,4 +7,4 @@ router = APIRouter()
 
 @router.get("/next-bell", response_model=NextBellResponse, summary="Следующий звонок")
 async def next_bell():
-    return get_next_bell()
+    return await get_next_bell()
