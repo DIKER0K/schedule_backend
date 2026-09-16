@@ -1,7 +1,7 @@
 import asyncio
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from app.routers import bell_schedule, users, schedule, ai
+from app.routers import bell_schedule, users, schedule, ai, next_bell
 from app.database import db
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -43,6 +43,7 @@ app.include_router(
     bell_schedule.router, prefix="/bell_schedule", tags=["Bell schedule"]
 )
 app.include_router(ai.router, prefix="/ai", tags=["ai"])
+app.include_router(next_bell.router, prefix="", tags=["Next bell"])
 
 
 @app.get("/")
