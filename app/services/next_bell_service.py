@@ -245,14 +245,13 @@ def _build_timeline(intervals: list) -> list:
         if index + 1 < len(intervals):
             following = intervals[index + 1]
             if lesson["end"] < following["start"]:
-                same_pair = lesson["number"] == following["number"]
-                label = "пересменок" if same_pair else "перемена"
+                label = "перемена"
                 timeline.append(
                     {
                         "type": "break",
                         "number": None,
                         "part": None,
-                        # Внутри пары перерыв короткий — это пересменок
+                        # внутри пары перерыв между половинками — тоже перемена
                         "label": label,
                         "label_inline": label,
                         "start": lesson["end"],
