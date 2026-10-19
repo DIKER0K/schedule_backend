@@ -4,6 +4,7 @@ from app.database import db
 from app.models.schedule import Schedule
 from app.models.schedule_upload import UploadResponse
 from app.models.teacher_schedule import (
+    ParallelLesson,
     TeacherLesson,
     TeacherScheduleResponse,
     TeacherShiftSchedule,
@@ -38,6 +39,80 @@ class ScheduleService:
 
         sorted_keys = sorted(lessons.keys(), key=parse_key)
         return {k: lessons[k] for k in sorted_keys}
+
+    @staticmethod
+    def _put_lesson(
+        day_slots: dict,
+        num: str,
+        group_name: str,
+        subject: str,
+        classroom,
+        time,
+    ) -> None:
+        """Кладёт пару преподавателя в слот дня, не теряя параллельные группы.
+
+        Раньше здесь была прямая запись `day_slots[num] = TeacherLesson(...)`.
+        Если преподаватель ведёт одну и ту же пару у нескольких групп, каждая
+        следующая группа ЗАТИРАЛА предыдущую — в ответе оставалась одна группа
+        из многих (у Мымриной Ю.Г. на «Разговорах о важном» оставалась 1 группа
+        из 8).
+
+        Теперь первая встреченная группа становится основной парой, остальные —
+        её `parallels`.
+
+        Приоритет выбора основной пары: нулевая пара -> младший номер пары ->
+        алфавит по группе. Порядок обхода `db.schedules` не гарантирован, поэтому
+        выбор не должен зависеть от того, чей документ попался первым.
+
+        Идемпотентно: ту же группу повторно не добавит.
+        """
+        if num not in day_slots:
+            day_slots[num] = TeacherLesson(
+                subject=subject,
+                group=group_name,
+                classroom=classroom,
+                time=time,
+            )
+            return
+
+        current = day_slots[num]
+
+        # та же группа — ничего не делаем (повторный документ в базе)
+        if current.group == group_name:
+            return
+
+        # У нулевой пары предмет и время обычно пустые у всех групп. Если
+        # основная пара «пустее» новой — берём новую как основную, а прежнюю
+        # уводим в параллели, чтобы в ответе не оказалось пустого предмета.
+        if not (current.subject or "").strip() and (subject or "").strip():
+            day_slots[num] = TeacherLesson(
+                subject=subject,
+                group=group_name,
+                classroom=classroom,
+                time=time,
+                parallels=[
+                    ParallelLesson(
+                        subject=current.subject,
+                        group=current.group,
+                        classroom=current.classroom,
+                    ),
+                    *current.parallels,
+                ],
+            )
+            return
+
+        # обычный случай — уводим группу в параллели
+        parallel = ParallelLesson(
+            subject=subject, group=group_name, classroom=classroom
+        )
+        for existing in current.parallels:
+            if existing.group == group_name:
+                return  # уже есть
+        current.parallels.append(parallel)
+
+        # у основной пары должно быть время; у параллелей его нет
+        if not current.time and time:
+            current.time = time
 
     @staticmethod
     async def get_all_schedules():
@@ -235,6 +310,22 @@ class ScheduleService:
 
         schedules = await db.schedules.find().to_list(1000)
 
+        # Устойчивый порядок обхода. Раньше он зависел от порядка документов в
+        # Mongo, поэтому «основной» группой в параллели становилась случайная
+        # (и менялась от запроса к запросу). Сортируем по имени группы, чтобы
+        # одна и та же пара всегда отдавалась одинаково.
+        def _group_sort_key(doc):
+            name = (doc.get("group_name") or "").strip()
+            head = ""
+            for ch in name:
+                if ch.isdigit():
+                    head += ch
+                else:
+                    break
+            return (int(head) if head else 999, name.casefold())
+
+        schedules = sorted(schedules, key=_group_sort_key)
+
         teacher_found_anywhere = False
         first_shift: dict[str, dict] = {}
         second_shift: dict[str, dict] = {}
@@ -290,11 +381,13 @@ class ScheduleService:
                         or normalize_day_name(day_name) == normalized_day
                     ):
                         shift_target.setdefault(day_name, {})
-                        shift_target[day_name]["0"] = TeacherLesson(
-                            subject=zero.get("subject", ""),
-                            group=group_name,
-                            classroom=zero.get("classroom", ""),
-                            time=zero.get("time"),
+                        ScheduleService._put_lesson(
+                            shift_target[day_name],
+                            "0",
+                            group_name,
+                            zero.get("subject", ""),
+                            zero.get("classroom", ""),
+                            zero.get("time"),
                         )
 
             # обычные пары
@@ -307,11 +400,13 @@ class ScheduleService:
                             or normalize_day_name(day_name) == normalized_day
                         ):
                             shift_target.setdefault(day_name, {})
-                            shift_target[day_name][num] = TeacherLesson(
-                                subject=info.get("subject", ""),
-                                group=group_name,
-                                classroom=info.get("classroom", ""),
-                                time=info.get("time"),
+                            ScheduleService._put_lesson(
+                                shift_target[day_name],
+                                num,
+                                group_name,
+                                info.get("subject", ""),
+                                info.get("classroom", ""),
+                                info.get("time"),
                             )
 
         if not teacher_found_anywhere:
