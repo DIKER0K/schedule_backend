@@ -6,6 +6,11 @@ MAIN_BELL_FILE = "bell_schedule.json"
 
 
 async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = None):
+    """Проставляет время пар по расписанию звонков.
+
+    Обновляется каждая версия расписания (документ = версия группы): время
+    пар своё в каждой, и запись адресуется по `_id`, а не по `group_name`.
+    """
     schedules = await db.schedules.find().to_list(None)
     updated_count = 0
 
@@ -47,8 +52,12 @@ async def _update_all_schedules(bell_data: dict, only_days: list[str] | None = N
                         modified = True
 
         if modified:
+            # Документ — это версия расписания, у группы их может быть
+            # несколько. Пишем ровно в ту версию, которую обработали: фильтр
+            # по `group_name` затёр бы содержимое остальных версий результатом
+            # последней обработанной.
             await db.schedules.update_one(
-                {"group_name": group_name}, {"$set": {"schedule": schedule}}
+                {"_id": s["_id"]}, {"$set": {"schedule": schedule}}
             )
             updated_count += 1
 

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from docx import Document
 from app.database import db
+from app.services.schedule_versions import mongo_date, parse_title_date
 
 SCHEDULE_FILE = "Расписание.docx"
 SHIFTS_FILE = "group_shifts.json"
@@ -263,10 +264,23 @@ def parse_schedule_table_fixed(table, group_name: str, schedules: dict):
 
 
 def parse_schedule_from_docx(file_path: str):
-    """Парсит расписание из DOCX и возвращает dict с логом"""
+    """Парсит расписание из DOCX: {группа: расписание}."""
+    schedules, _ = parse_schedule_document(file_path)
+    return schedules
+
+
+def parse_schedule_document(file_path: str):
+    """Парсит расписание и даты начала версий из DOCX.
+
+    Возвращает ({группа: расписание}, {группа: дата из заголовка}). Дата берётся
+    из заголовка «Расписание уроков для <группа> группы с 02.11.2026 г.»;
+    если её в заголовке нет — группы в словаре дат не будет, и вызывающий
+    подставит дату из параметра запроса.
+    """
     print(f"=== [DOCX] Открытие файла: {file_path} ===")
     doc = Document(file_path)
     schedules = {}
+    group_dates = {}
     current_group = None
 
     # 1. Поиск групп в параграфах
@@ -284,6 +298,10 @@ def parse_schedule_from_docx(file_path: str):
                 "days": {day: {} for day in days_ru},
                 "zero_lesson": {day: {} for day in days_ru},
             }
+            start_date = parse_title_date(text)
+            if start_date:
+                group_dates[current_group] = start_date
+                print(f"[ГРУППА] Дата начала версии: {start_date}")
             continue
 
     print(f"[DOCX] Итого найдено групп: {list(schedules.keys())}")
@@ -326,7 +344,7 @@ def parse_schedule_from_docx(file_path: str):
         group_index += 1
 
     print("=== [DOCX] Парсинг завершен ===")
-    return schedules
+    return schedules, group_dates
 
 
 # ============== РАБОТА СО СМЕНАМИ И БД ==============
@@ -357,11 +375,15 @@ def load_group_shifts():
 
 
 async def load_schedule_to_db():
-    """Парсит и сохраняет расписание в MongoDB"""
+    """Парсит и сохраняет расписание из файла в MongoDB.
+
+    Запись идёт как версия на сегодняшнюю дату (см. app/services/schedule_versions):
+    прежние версии не удаляются.
+    """
     if not os.path.exists(SCHEDULE_FILE):
         print(f"❌ Файл {SCHEDULE_FILE} не найден")
         return
-    data = parse_schedule_from_docx(SCHEDULE_FILE)
+    data, group_dates = parse_schedule_document(SCHEDULE_FILE)
     if not data:
         print("❌ Не удалось распарсить расписание.")
         return
@@ -369,18 +391,24 @@ async def load_schedule_to_db():
     # Загрузка смен
     shifts = load_group_shifts()
 
-    # Очистим старые записи
-    await db.schedules.delete_many({})
+    from app.services.schedule_versions import today
+
+    fallback_date = today()
     for group, schedule in data.items():
         # Добавляем кабинеты из group_shifts.json
         schedule_with_classrooms = add_classrooms_to_schedule(schedule, group, shifts)
+        valid_from = group_dates.get(group, fallback_date)
 
-        await db.schedules.insert_one(
+        await db.schedules.update_one(
+            {"group_name": group, "valid_from": mongo_date(valid_from)},
             {
-                "group_name": group,
-                "schedule": schedule_with_classrooms,
-                "shift_info": shifts.get(group, {"shift": 1}),
-                "updated_at": datetime.now(),
-            }
+                "$set": {
+                    "group_name": group,
+                    "schedule": schedule_with_classrooms,
+                    "shift_info": shifts.get(group, {"shift": 1}),
+                    "updated_at": datetime.now(),
+                }
+            },
+            upsert=True,
         )
-    print(f"✅ Залито расписание для {len(data)} групп в MongoDB")
+    print(f"✅ Залито расписание для {len(data)} групп в MongoDB (с {fallback_date})")

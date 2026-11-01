@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from pydantic import BaseModel, Field
 from typing import Optional, Dict
 
@@ -25,4 +25,21 @@ class Schedule(BaseModel):
     note: Optional[str] = Field(
         None,
         description="Объявление дня, если на сегодня есть приказ администрации",
+    )
+    # Версия расписания, из которой взяты занятия
+    valid_from: Optional[date] = Field(
+        None,
+        description="С какой даты действует версия расписания, из которой взят ответ",
+    )
+    valid_to: Optional[date] = Field(
+        None,
+        description="По какую дату включительно действует версия; пусто — до следующей",
+    )
+    requested_date: Optional[date] = Field(
+        None,
+        description="Дата, на которую запрошено расписание",
+    )
+    day: Optional[str] = Field(
+        None,
+        description="День недели, если запрос был за один день",
     )
