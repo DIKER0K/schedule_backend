@@ -4,6 +4,9 @@
 конкретной группы: звонок общий для всей школы, поэтому ответ одинаковый для
 всех групп и ролей.
 
+Нерабочие дни (приказ «4 ноября — выходной») берутся из коллекции `holidays`:
+в такой день звонков нет вообще, а «следующий учебный день» перепрыгивает его.
+
 Второй смены сейчас нет. Параметр shift оставлен на будущее: в выдачу попадает
 только выбранная смена (по умолчанию первая).
 """
@@ -21,6 +24,7 @@ from app.models.next_bell import (
     NextBellInfo,
     NextBellResponse,
 )
+from app.services.holidays_service import fmt_day_month, holidays_between
 
 # Часовой пояс школы. Контейнер живёт в UTC, поэтому считаем явно.
 TZ_NAME = os.getenv("SCHOOL_TZ", "Asia/Yekaterinburg")
@@ -309,10 +313,18 @@ def _build_timeline(intervals: list) -> list:
     return timeline
 
 
-def _next_school_day_first_bell(data: dict, shift: int, now: datetime):
-    """Первый звонок ближайшего учебного дня (для вечера и выходных)."""
-    for offset in range(1, 8):
+def _next_school_day_first_bell(
+    data: dict, shift: int, now: datetime, holidays: Optional[dict] = None
+):
+    """Первый звонок ближайшего учебного дня (для вечера и выходных).
+
+    Нерабочие дни (`holidays`: {«ГГГГ-ММ-ДД»: название}) пропускаются: вечером
+    3 ноября следующий учебный день — 5 ноября, а не выходной 4-е.
+    """
+    for offset in range(1, 15):
         day = now + timedelta(days=offset)
+        if holidays and day.strftime("%Y-%m-%d") in holidays:
+            continue
         day_key = WEEKDAY_TO_BELL_KEY.get(day.weekday())
         if not day_key:
             continue
@@ -476,8 +488,9 @@ def _no_bells_response(
     shift: int,
     data: dict,
     headline: str,
+    holidays: Optional[dict] = None,
 ) -> NextBellResponse:
-    day_name, first_bell = _next_school_day_first_bell(data, shift, now)
+    day_name, first_bell = _next_school_day_first_bell(data, shift, now, holidays)
     message = headline
     if first_bell:
         message += f"\n\n🗓 Следующий учебный день — {day_name.lower()}, первый звонок в {first_bell}."
@@ -496,6 +509,33 @@ def _no_bells_response(
     )
 
 
+def _holiday_response(
+    now: datetime, shift: int, data: dict, holidays: dict
+) -> NextBellResponse:
+    """Ответ на нерабочий день: праздник, занятий и звонков нет."""
+    title = holidays.get(now.strftime("%Y-%m-%d")) or ""
+    message = f"🎉 {fmt_day_month(now.date())} — выходной"
+    message += f" ({title})." if title else "."
+    message += " Звонков нет."
+
+    day_name, first_bell = _next_school_day_first_bell(data, shift, now, holidays)
+    if first_bell:
+        message += f"\n\n🗓 Следующий учебный день — {day_name.lower()}, первый звонок в {first_bell}."
+
+    return NextBellResponse(
+        current_time=now.strftime("%H:%M"),
+        current_day=WEEKDAY_TO_RU[now.weekday()],
+        current_shift=shift,
+        is_school_day=False,
+        current_event=CurrentEvent(
+            type=EventType.no_classes,
+            label="выходной",
+        ),
+        next_bell=None,
+        message=message,
+    )
+
+
 async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellResponse:
     now = _resolve_now(at)
     weekday = now.weekday()
@@ -505,16 +545,29 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
     now_seconds = now.hour * 3600 + now.minute * 60 + now.second
 
     data = _load_bell_data()
+    # Выходные рядом с сегодняшним днём: нужны и для «сегодня выходной», и для
+    # поиска следующего учебного дня (праздники могут идти подряд).
+    holidays = await holidays_between(
+        now.date(), now.date() + timedelta(days=15)
+    )
+
+    if date_key in holidays:
+        return _holiday_response(now, shift, data, holidays)
 
     if day_key is None:
         return _no_bells_response(
-            now, day_key, shift, data, "🌙 Сегодня выходной — звонков нет."
+            now, day_key, shift, data, "🌙 Сегодня выходной — звонков нет.", holidays
         )
 
     intervals = _build_intervals(_grid_for(data, day_key, shift, date_key), day_key)
     if not intervals:
         return _no_bells_response(
-            now, None, shift, data, "🤷 Расписание звонков на сегодня не найдено."
+            now,
+            None,
+            shift,
+            data,
+            "🤷 Расписание звонков на сегодня не найдено.",
+            holidays,
         )
 
     timeline = _build_timeline(intervals)
@@ -553,7 +606,7 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
 
     # --- Занятия закончились ------------------------------------------------
     if now_seconds >= last["end"] * 60:
-        day_name, first_bell = _next_school_day_first_bell(data, shift, now)
+        day_name, first_bell = _next_school_day_first_bell(data, shift, now, holidays)
         message = (
             f"🌙 Звонков больше нет — занятия закончились в {last['end_str']}."
         )
@@ -654,5 +707,5 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
 
     # Сюда попасть не должны, но лучше честный ответ, чем 500
     return _no_bells_response(
-        now, day_key, shift, data, "🤷 Не удалось определить следующий звонок."
+        now, day_key, shift, data, "🤷 Не удалось определить следующий звонок.", holidays
     )
