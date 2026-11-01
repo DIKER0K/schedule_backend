@@ -58,11 +58,6 @@ def fmt_day_month(day: date) -> str:
     return f"{day.day} {MONTHS_GENITIVE[day.month - 1]}"
 
 
-def day_key(value) -> str:
-    """Дата в том виде, в каком лежит в базе: 'ГГГГ-ММ-ДД'."""
-    return _as_date(value).isoformat()
-
-
 def _as_date(value) -> date:
     """date/datetime/строка → date. ValueError — если не разобрать."""
     if isinstance(value, datetime):
@@ -152,18 +147,24 @@ async def list_holidays(year: Optional[int] = None) -> list:
         query = {"date": {"$gte": f"{year:04d}-01-01", "$lte": f"{year:04d}-12-31"}}
 
     docs = await db.holidays.find(query).sort("date", 1).to_list(None)
-    return [
-        {"date": _as_date(doc.get("date")), "title": str(doc.get("title") or "")}
-        for doc in docs
-    ]
+    result = []
+    for doc in docs:
+        try:
+            day = _as_date(doc.get("date"))
+        except ValueError:  # запись, заведённая руками, не должна ронять выдачу
+            logger.warning("Нерабочий день с битой датой пропущен: %r", doc.get("date"))
+            continue
+        result.append({"date": day, "title": str(doc.get("title") or "")})
+    return result
 
 
 async def holiday_on(day) -> Optional[dict]:
     """Выходной на дату или None: {'date': '2026-11-04', 'title': '...'}."""
-    doc = await db.holidays.find_one({"date": _as_date(day).isoformat()})
+    day = _as_date(day)
+    doc = await db.holidays.find_one({"date": day.isoformat()})
     if not doc:
         return None
-    return {"date": doc["date"], "title": str(doc.get("title") or "")}
+    return {"date": day.isoformat(), "title": str(doc.get("title") or "")}
 
 
 async def holidays_between(start, end) -> dict:
@@ -178,7 +179,15 @@ async def holidays_between(start, end) -> dict:
     docs = await db.holidays.find(
         {"date": {"$gte": first.isoformat(), "$lte": last.isoformat()}}
     ).to_list(None)
-    return {doc["date"]: str(doc.get("title") or "") for doc in docs}
+
+    result = {}
+    for doc in docs:
+        try:
+            key = _as_date(doc.get("date")).isoformat()
+        except ValueError:
+            continue
+        result[key] = str(doc.get("title") or "")
+    return result
 
 
 async def add_holiday(day, title: str) -> dict:

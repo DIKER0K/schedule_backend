@@ -19,6 +19,7 @@ from app.services.holidays_service import (
     ensure_holiday_indexes,
     fmt_day_month,
     holiday_on,
+    holidays_between,
     list_holidays,
     remove_holiday,
     seed_holidays,
@@ -116,6 +117,19 @@ def test_list_holidays_sorted_and_parsed(fake_db):
 def test_day_month_is_russian(fake_db):
     assert fmt_day_month(date(2026, 11, 4)) == "4 ноября"
     assert fmt_day_month(date(2027, 1, 1)) == "1 января"
+
+
+def test_broken_manual_record_does_not_break_output(fake_db):
+    """Запись с битой датой, заведённая руками, не роняет список и звонки."""
+    asyncio.run(fake_db.holidays.insert_one({"date": "не дата", "title": "Мусор"}))
+    asyncio.run(add_holiday(date(2026, 11, 4), HOLIDAY["title"]))
+
+    assert [item["date"] for item in asyncio.run(list_holidays())] == [
+        date(2026, 11, 4)
+    ]
+    assert asyncio.run(holidays_between(date(2026, 11, 1), date(2026, 11, 30))) == {
+        "2026-11-04": HOLIDAY["title"]
+    }
 
 
 # --------------------------------------------------------------------------
