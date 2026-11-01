@@ -40,6 +40,13 @@ CANDIDATE_BELL_FILES = [
 ]
 OVERRIDE_FILE = "bell_schedule_overrides.json"
 
+# Разовые правила на конкретную дату (приказ по колледжу: «2 ноября звонки такие»).
+# Ключ — дата в формате ГГГГ-ММ-ДД, значение — та же структура, что у дня недели
+# в bell_schedule.json, плюс необязательное поле "note" — объявление дня.
+# Файл лежит в репозитории, потому что внутри контейнера ручные файлы живут
+# только до пересборки образа.
+DATE_OVERRIDES_FILE = "bell_date_overrides.json"
+
 WEEKDAY_TO_RU = {
     0: "Понедельник",
     1: "Вторник",
@@ -122,13 +129,40 @@ def _load_bell_data() -> dict:
     return {}
 
 
-def _grid_for(data: dict, day_key: str, shift: int) -> dict:
-    """Сетка звонков выбранной смены на день (+ ручные правки из админки)."""
+def _date_overrides() -> dict:
+    """Разовые правила по датам: {"2026-11-02": {"note": ..., "1_shift": {...}}}."""
+    data = _read_json(DATE_OVERRIDES_FILE) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _date_note(date_key: str) -> Optional[str]:
+    """Объявление дня из разового правила (например, про корпус)."""
+    note = (_date_overrides().get(date_key) or {}).get("note")
+    return str(note).strip() if note else None
+
+
+def _grid_for(
+    data: dict, day_key: str, shift: int, date_key: Optional[str] = None
+) -> dict:
+    """Сетка звонков выбранной смены на день (+ ручные правки из админки).
+
+    Порядок наложения: расписание дня недели → правки админки по дню недели →
+    разовое правило на дату. Дата приоритетнее: 2 ноября может отличаться от
+    остальных понедельников, а остальные понедельники остаются прежними.
+    """
     grid = dict((data.get(day_key) or {}).get(f"{shift}_shift") or {})
 
     overrides = _read_json(OVERRIDE_FILE) or {}
     override_grid = (overrides.get(day_key) or {}).get(f"{shift}_shift") or {}
     grid.update(override_grid)
+
+    if date_key:
+        dated = _date_overrides().get(date_key) or {}
+        dated_shift = dated.get(f"{shift}_shift")
+        # Приказ на дату задаёт полную сетку дня, поэтому заменяет смену целиком:
+        # иначе из обычного дня недели остались бы лишние пары и «часы» пар.
+        if isinstance(dated_shift, dict) and dated_shift:
+            grid = dict(dated_shift)
 
     return grid
 
@@ -270,7 +304,9 @@ def _next_school_day_first_bell(data: dict, shift: int, now: datetime):
         day_key = WEEKDAY_TO_BELL_KEY.get(day.weekday())
         if not day_key:
             continue
-        intervals = _build_intervals(_grid_for(data, day_key, shift), day_key)
+        intervals = _build_intervals(
+            _grid_for(data, day_key, shift, day.strftime("%Y-%m-%d")), day_key
+        )
         if intervals:
             return WEEKDAY_TO_RU[day.weekday()], intervals[0]["start_str"]
     return None, None
@@ -338,6 +374,13 @@ def _resolve_now(at: Optional[str]) -> datetime:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=TZ)
     return moment.astimezone(TZ)
+
+
+def _with_note(message: str, note: Optional[str]) -> str:
+    """Ставит объявление дня (например, «все учатся во 2 корпусе») первой строкой."""
+    if not note:
+        return message
+    return f"\U0001F4CD {note}\n\n{message}"
 
 
 def _lessons_payload(intervals: list) -> list:
@@ -445,6 +488,8 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
     now = _resolve_now(at)
     weekday = now.weekday()
     day_key = WEEKDAY_TO_BELL_KEY.get(weekday)
+    date_key = now.strftime("%Y-%m-%d")
+    day_note = _date_note(date_key)
     now_seconds = now.hour * 3600 + now.minute * 60 + now.second
 
     data = _load_bell_data()
@@ -454,7 +499,7 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
             now, day_key, shift, data, "🌙 Сегодня выходной — звонков нет."
         )
 
-    intervals = _build_intervals(_grid_for(data, day_key, shift), day_key)
+    intervals = _build_intervals(_grid_for(data, day_key, shift, date_key), day_key)
     if not intervals:
         return _no_bells_response(
             now, None, shift, data, "🤷 Расписание звонков на сегодня не найдено."
@@ -490,7 +535,8 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
                 in_seconds=seconds,
             ),
             lessons=_lessons_payload(intervals),
-            message=message,
+            note=day_note,
+            message=_with_note(message, day_note),
         )
 
     # --- Занятия закончились ------------------------------------------------
@@ -516,7 +562,8 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
             ),
             next_bell=None,
             lessons=_lessons_payload(intervals),
-            message=message,
+            note=day_note,
+            message=_with_note(message, day_note),
         )
 
     # --- Идёт пара или перемена ---------------------------------------------
@@ -589,7 +636,8 @@ async def get_next_bell(shift: int = 1, at: Optional[str] = None) -> NextBellRes
             current_event=current_event,
             next_bell=bell,
             lessons=_lessons_payload(intervals),
-            message="\n".join(lines),
+            note=day_note,
+            message=_with_note("\n".join(lines), day_note),
         )
 
     # Сюда попасть не должны, но лучше честный ответ, чем 500

@@ -62,5 +62,7 @@ class NextBellResponse(BaseModel):
     next_bell: Optional[NextBellInfo] = None
     # Сетка пар дня — для кнопок «когда N пара» под сообщением
     lessons: List[LessonSlot] = Field(default_factory=list)
+    # Объявление дня из разового правила (например, «все учатся во 2 корпусе»)
+    note: Optional[str] = None
     # Готовый текст для бота
     message: Optional[str] = None
