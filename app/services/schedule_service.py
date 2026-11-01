@@ -3,7 +3,7 @@ from datetime import date, datetime
 from fastapi import HTTPException, UploadFile
 from app.database import db
 from app.models.schedule import Schedule
-from app.models.schedule_upload import UploadResponse
+from app.models.schedule_upload import ClassroomUploadResponse, UploadResponse
 from app.models.teacher_schedule import (
     ParallelLesson,
     TeacherLesson,
@@ -17,12 +17,20 @@ from app.services.schedule_parser import (
 )
 from app.utils.common import normalize_day_name, normalize_name
 from app.services.bell_service import apply_bell_schedule_from_files
+from app.services.classroom_distribution import (
+    distribution_on_date,
+    distribution_period,
+    group_key,
+    parse_distribution_document,
+    versions_for_period,
+)
 from app.services.next_bell_service import (
     TZ,
     WEEKDAY_TO_BELL_KEY,
     WEEKDAY_TO_RU,
     _date_note,
     _date_overrides,
+    bell_grid_for,
 )
 from app.services.schedule_versions import (
     applicable_versions,
@@ -202,23 +210,74 @@ class ScheduleService:
         return schedule_data, note
 
     @staticmethod
+    def apply_shift_bell_grid(schedule_data: dict, shift: int, day_date: date):
+        """Время пар по сетке звонков своей смены на дату.
+
+        В базе время пар проставлено при загрузке по смене группы из
+        `group_shifts.json`. У версии смена своя: 2 и 3 ноября часть групп
+        учится во вторую смену, и время пар у них считается по сетке второй
+        смены на эту дату — обычной или разовой из приказа. Обратный случай
+        тоже возможен (группа постоянно во вторую смену, а приказ вернул её в
+        первую), поэтому сетка смены применяется в обе стороны.
+        """
+        grid = bell_grid_for(day_date, shift)
+        if not grid:
+            return schedule_data
+
+        day_name = WEEKDAY_TO_RU[day_date.weekday()]
+        normalized = normalize_day_name(day_name)
+        schedule_data = copy.deepcopy(schedule_data)
+
+        for section in ("days", "zero_lesson"):
+            for dname, lessons in (schedule_data.get(section) or {}).items():
+                if normalize_day_name(dname) != normalized:
+                    continue
+                for number, lesson in (lessons or {}).items():
+                    if not isinstance(lesson, dict):
+                        continue
+                    number_key = str(number).strip()
+                    span = grid.get(number_key) or grid.get(
+                        number_key.split(".")[0].strip()
+                    )
+                    if span:
+                        lesson["time"] = span
+        return schedule_data
+
+    @staticmethod
     async def get_all_schedules():
         """Все группы по одной записи: версия расписания, действующая сегодня."""
         docs = await db.schedules.find().to_list(None)
         day = today()
+        by_group: dict[str, list] = {}
+        for doc in docs:
+            by_group.setdefault(doc.get("group_name"), []).append(doc)
+
         current = sorted(latest_per_group(docs, day), key=group_sort_key)
-        return [
-            Schedule(
-                group_name=doc.get("group_name"),
-                shift_info=doc.get("shift_info") or {},
-                updated_at=doc.get("updated_at"),
-                schedule=doc.get("schedule") or {},
-                valid_from=coerce_date(doc.get("valid_from")),
-                valid_to=version_end(doc),
-                requested_date=day,
+        result = []
+        for doc in current:
+            # Распределение ищем по всем версиям группы: приказ мог остаться в
+            # версии, которую более поздняя загрузка расписания уже сменила.
+            distribution = distribution_on_date(
+                by_group.get(doc.get("group_name"), [doc]), day
             )
-            for doc in current
-        ]
+            shift_info = doc.get("shift_info") or {}
+            result.append(
+                Schedule(
+                    group_name=doc.get("group_name"),
+                    shift_info=shift_info,
+                    shift=distribution["shift"]
+                    or int(shift_info.get("shift") or 1),
+                    classroom=distribution["classroom"],
+                    building=distribution["building"],
+                    classroom_note=distribution["classroom_note"],
+                    updated_at=doc.get("updated_at"),
+                    schedule=doc.get("schedule") or {},
+                    valid_from=coerce_date(doc.get("valid_from")),
+                    valid_to=version_end(doc),
+                    requested_date=day,
+                )
+            )
+        return result
 
     @staticmethod
     async def get_schedule_by_group(
@@ -253,7 +312,12 @@ class ScheduleService:
 
         newest = versions[0]
         shift_info = newest.get("shift_info") or {}
-        shift = int(shift_info.get("shift") or 1)
+        # Смена и кабинет — из версии, действующей на запрошенную дату: на 2–3
+        # ноября часть групп переезжает во вторую смену, дальше — обычная.
+        # Смотрим все версии группы: приказ мог остаться в той, которую уже
+        # сменила более поздняя загрузка расписания.
+        distribution = distribution_on_date(docs, day_date)
+        shift = distribution["shift"] or int(shift_info.get("shift") or 1)
         # Тот же момент, что и запрошенная дата: время пар подменяется по приказу
         # на эту дату, а не на сегодняшнюю.
         at = f"{day_date.isoformat()}T12:00"
@@ -268,9 +332,16 @@ class ScheduleService:
             full_schedule, day_note = ScheduleService.apply_today_bells(
                 full_schedule, shift, at
             )
+            full_schedule = ScheduleService.apply_shift_bell_grid(
+                full_schedule, shift, day_date
+            )
             return Schedule(
                 group_name=group_name,
                 shift_info=shift_info,
+                shift=shift,
+                classroom=distribution["classroom"],
+                building=distribution["building"],
+                classroom_note=distribution["classroom_note"],
                 updated_at=newest.get("updated_at"),
                 schedule=full_schedule,
                 valid_from=coerce_date(newest.get("valid_from")),
@@ -298,9 +369,16 @@ class ScheduleService:
         filtered_schedule, day_note = ScheduleService.apply_today_bells(
             filtered_schedule, shift, at
         )
+        filtered_schedule = ScheduleService.apply_shift_bell_grid(
+            filtered_schedule, shift, day_date
+        )
         return {
             "group_name": group_name,
             "shift_info": shift_info,
+            "shift": shift,
+            "classroom": distribution["classroom"],
+            "building": distribution["building"],
+            "classroom_note": distribution["classroom_note"],
             "day": day,
             "schedule": filtered_schedule,
             "updated_at": source.get("updated_at"),
@@ -481,6 +559,210 @@ class ScheduleService:
             for path in [temp_docx, temp_json]:
                 if path and os.path.exists(path):
                     os.remove(path)
+
+    @staticmethod
+    async def upload_classrooms(
+        file: UploadFile,
+        valid_from: str | None = None,
+        valid_to: str | None = None,
+        building: int | None = None,
+    ):
+        """Загружает docx «Распределение групп по кабинетам» на период.
+
+        Смена и кабинет записываются в ВЕРСИИ расписания, действующие на этот
+        период, вместе с границами периода (`classrooms_valid_from/to`):
+        `group_shifts.json` и `shift_info` группы не меняются, а после периода
+        группа снова учится в свою обычную смену. Даты берутся из заголовка
+        файла («на 2 и 3 ноября 2026»), `valid_from`/`valid_to` — запасной
+        вариант, если дат в заголовке нет.
+
+        Ошибки:
+        - 400: не docx, ни одной группы в таблице, не разобрать период;
+        - 409: расписания на период ещё нет — пустые версии не создаём;
+        - 409: на версию уже загружено распределение на другой период —
+          приказ на новую неделю должен прийти вместе с расписанием на неё,
+          иначе переезд на 5–6 ноября переписал бы данные 2–3 ноября.
+        """
+        import os
+
+        if not (file.filename or "").lower().endswith(".docx"):
+            raise HTTPException(
+                status_code=400, detail="Нужен DOCX файл распределения по кабинетам"
+            )
+
+        temp_docx = f"temp_classrooms_{datetime.now().timestamp()}.docx"
+        try:
+            with open(temp_docx, "wb") as handle:
+                handle.write(await file.read())
+
+            parsed = parse_distribution_document(temp_docx, fallback_year=today().year)
+            groups = parsed["groups"]
+            if not groups:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "В файле не найдено ни одной группы: ожидается таблица "
+                        "«Группа | Кабинет» с блоками «1 СМЕНА» / «2 СМЕНА»"
+                    ),
+                )
+
+            try:
+                request_from = parse_requested_date(valid_from)
+                request_to = parse_requested_date(valid_to)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Не удалось разобрать период: {exc}"
+                )
+
+            start = parsed["valid_from"] or request_from
+            end = parsed["valid_to"] or request_to or start
+            if start is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Не удалось определить период: в заголовке файла нет даты — "
+                        "укажите valid_from"
+                    ),
+                )
+            if end is None or end < start:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Неверный период: {fmt_date(start)} — {fmt_date(end)}",
+                )
+
+            building_value = building if building is not None else parsed["building"]
+
+            docs = await db.schedules.find().to_list(None)
+            by_group: dict[str, list] = {}
+            for doc in docs:
+                by_group.setdefault(doc.get("group_name"), []).append(doc)
+
+            # «2ТД» в приказе и «2 ТД» в расписании — одна и та же группа.
+            canonical: dict[str, str] = {}
+            for name in sorted(by_group, key=str):
+                canonical.setdefault(group_key(name), name)
+
+            # Сначала проверяем всё, потом пишем: иначе половина групп уже
+            # обновлена, а запрос упал.
+            plans = []
+            without_schedule = []
+            conflicts = []
+            for group, entry in groups.items():
+                # «2ТД» в приказе и «2 ТД» в расписании — одна и та же группа.
+                name = group
+                if name not in by_group:
+                    name = canonical.get(group_key(group)) or group
+
+                # Приказ пишется во ВСЕ версии группы, чьё окно действия
+                # пересекается с периодом: на 2 и 3 ноября расписание могло
+                # прийти двумя файлами, и второй день не должен потерять смену.
+                targets = versions_for_period(by_group.get(name, []), start, end)
+                if not targets:
+                    without_schedule.append(group)
+                    continue
+
+                conflict = None
+                for target in targets:
+                    existing_from, existing_to = distribution_period(target)
+                    if existing_from is not None and (
+                        existing_from != start or existing_to != end
+                    ):
+                        conflict = (existing_from, existing_to)
+                        break
+                if conflict is not None:
+                    conflicts.append((group, conflict[0], conflict[1]))
+                    continue
+
+                plans.append((group, entry, targets))
+
+            if conflicts:
+                group, existing_from, existing_to = conflicts[0]
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "На версию расписания для группы "
+                        f"'{group}' уже загружено распределение на "
+                        f"{fmt_date(existing_from)} — {fmt_date(existing_to)}. "
+                        f"Сначала загрузите расписание на {fmt_date(start)} — "
+                        f"{fmt_date(end)}: приказ пишется в версию расписания, "
+                        "и на одну версию приходится один период"
+                    ),
+                )
+
+            updated = 0
+            first_shift = 0
+            second_shift = 0
+            without_classroom: list[str] = []
+
+            for group, entry, targets in plans:
+                shift_info = targets[0].get("shift_info") or {}
+                shift = entry.get("shift") or int(shift_info.get("shift") or 1)
+
+                fields = {
+                    "shift": shift,
+                    "classroom": entry.get("classroom"),
+                    "classroom_note": entry.get("classroom_note"),
+                    "classrooms_valid_from": mongo_date(start),
+                    "classrooms_valid_to": mongo_date(end),
+                }
+                if building_value is not None:
+                    fields["building"] = building_value
+
+                for target in targets:
+                    await db.schedules.update_one(
+                        {"_id": target["_id"]}, {"$set": fields}
+                    )
+                updated += 1
+
+                if shift == 1:
+                    first_shift += 1
+                elif shift == 2:
+                    second_shift += 1
+                if not entry.get("classroom"):
+                    without_classroom.append(group)
+
+            if updated == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Сначала загрузите расписание на этот период "
+                        f"({fmt_date(start)} — {fmt_date(end)})"
+                    ),
+                )
+
+            missing_text = (
+                f". Нет расписания на период у {len(without_schedule)} групп: "
+                f"{', '.join(sorted(without_schedule)[:10])}"
+                if without_schedule
+                else ""
+            )
+            return ClassroomUploadResponse(
+                message=(
+                    f"✅ Распределение по кабинетам на {fmt_date(start)} — "
+                    f"{fmt_date(end)} загружено для {updated} групп "
+                    f"({first_shift} — 1 смена, {second_shift} — 2 смена){missing_text}"
+                ),
+                updated_groups=updated,
+                total_groups=len(groups),
+                first_shift=first_shift,
+                second_shift=second_shift,
+                groups_without_classroom=sorted(without_classroom, key=str.casefold),
+                groups_without_schedule=sorted(without_schedule, key=str.casefold),
+                building=building_value,
+                valid_from=start,
+                valid_to=end,
+            )
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Ошибка при обработке файла: {exc}"
+            )
+
+        finally:
+            if os.path.exists(temp_docx):
+                os.remove(temp_docx)
 
     @staticmethod
     async def delete_schedule(group_name: str):

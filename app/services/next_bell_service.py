@@ -10,7 +10,7 @@
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -165,6 +165,18 @@ def _grid_for(
             grid = dict(dated_shift)
 
     return grid
+
+
+def bell_grid_for(day: date, shift: int) -> dict:
+    """Сетка звонков смены на конкретную дату: {номер пары: «HH:MM–HH:MM»}.
+
+    Публичная обёртка над `_grid_for` для тех, кому нужна сетка дня, а не
+    таймлайн: вторая смена на 2–3 ноября берёт время пар отсюда.
+    """
+    day_key = WEEKDAY_TO_BELL_KEY.get(day.weekday())
+    if not day_key:
+        return {}
+    return _grid_for(_load_bell_data(), day_key, shift, day.strftime("%Y-%m-%d"))
 
 
 # --------------------------------------------------------------------------

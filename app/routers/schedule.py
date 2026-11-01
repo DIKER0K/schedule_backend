@@ -2,7 +2,7 @@ from datetime import date
 from typing import List
 from fastapi import APIRouter, Form, Query, UploadFile, File
 from app.models.schedule import Schedule
-from app.models.schedule_upload import UploadResponse
+from app.models.schedule_upload import ClassroomUploadResponse, UploadResponse
 from app.models.teacher_schedule import TeacherScheduleResponse
 from app.services.schedule_service import ScheduleService
 
@@ -108,6 +108,68 @@ async def upload_schedule(
         shifts_file,
         valid_from=valid_from_form or valid_from,
         replace_all=replace_all_form or replace_all,
+    )
+
+
+# 🏫 Распределение групп по кабинетам на период
+@router.post(
+    "/classrooms/upload",
+    response_model=ClassroomUploadResponse,
+    summary="Загрузить распределение групп по кабинетам на период",
+    description=(
+        "Принимает DOCX «Распределение групп по кабинетам на ...»: таблица "
+        "«Группа | Кабинет», разбитая блоками «1 СМЕНА» / «2 СМЕНА». Смена и "
+        "кабинет записываются в ВЕРСИИ расписания, действующие на период, — "
+        "`group_shifts.json` и обычная смена группы не меняются. Период "
+        "берётся из заголовка файла («на 2 и 3 ноября 2026»); `valid_from` / "
+        "`valid_to` нужны, только если дат в заголовке нет. Группа, которой нет "
+        "в файле, сохраняет прежние значения. Если расписания на период ещё нет "
+        "— ответ 409: пустые версии не создаются. Второй ответ 409 — если на "
+        "версию уже загружено распределение на другой период: приказ на новую "
+        "неделю грузится после расписания на эту неделю."
+    ),
+    response_description=(
+        "Сколько групп обновлено, распределение по сменам и группы без кабинета."
+    ),
+)
+async def upload_classrooms(
+    file: UploadFile = File(
+        ...,
+        description="DOCX с распределением групп по кабинетам.",
+    ),
+    valid_from: str | None = Query(
+        None,
+        description="Первый день периода (2026-11-02 или 02.11.2026), если его нет в заголовке файла.",
+    ),
+    valid_to: str | None = Query(
+        None,
+        description="Последний день периода, если его нет в заголовке файла.",
+    ),
+    building: int | None = Query(
+        None,
+        description="Корпус на период (в приказе на 2–3 ноября 2026 — 2).",
+    ),
+    valid_from_form: str | None = Form(
+        None,
+        alias="valid_from",
+        description="То же, что valid_from в строке запроса, но полем формы.",
+    ),
+    valid_to_form: str | None = Form(
+        None,
+        alias="valid_to",
+        description="То же, что valid_to в строке запроса, но полем формы.",
+    ),
+    building_form: int | None = Form(
+        None,
+        alias="building",
+        description="То же, что building в строке запроса, но полем формы.",
+    ),
+):
+    return await ScheduleService.upload_classrooms(
+        file,
+        valid_from=valid_from_form or valid_from,
+        valid_to=valid_to_form or valid_to,
+        building=building_form if building_form is not None else building,
     )
 
 
