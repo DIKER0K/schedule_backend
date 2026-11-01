@@ -1,5 +1,6 @@
 """Общие фикстуры: тесты не должны ходить в прод-Mongo."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -43,6 +44,31 @@ def workdir(tmp_path, monkeypatch):
     """Рабочая папка: загрузка пишет временный docx в текущий каталог."""
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
+
+@pytest.fixture
+def bell_files(fake_db, workdir, monkeypatch):
+    """Включает настоящую подстановку времени пар из bell_schedule.json.
+
+    `fake_db` глушит чтение файла звонков — здесь возвращаем реальную функцию
+    и кладём файл в рабочую папку, чтобы проверять путь загрузки целиком.
+    """
+    import app.services.schedule_service as schedule_service
+    from app.services.bell_service import apply_bell_schedule_from_files
+
+    monkeypatch.setattr(
+        schedule_service, "apply_bell_schedule_from_files", apply_bell_schedule_from_files
+    )
+
+    bell_data = {
+        "понедельник": {"1_shift": {"1": "09:00–10:00", "2": "10:15–11:55"}},
+        "вторник-четверг": {"1_shift": {"1": "09:00–10:35", "2": "10:45–12:30"}},
+        "пятница": {"1_shift": {"1": "09:00–10:00", "2": "10:15–11:55"}},
+    }
+    (workdir / "bell_schedule.json").write_text(
+        json.dumps(bell_data, ensure_ascii=False), encoding="utf-8"
+    )
+    return workdir
 
 
 def build_docx(path, groups: dict) -> Path:
