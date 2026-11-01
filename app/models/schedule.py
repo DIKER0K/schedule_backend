@@ -16,6 +16,24 @@ class Schedule(BaseModel):
     group_name: str = Field(..., description="Название группы")
     schedule: ScheduleData
     shift_info: dict = Field(default_factory=dict)
+    # Смена, кабинет и корпус на период (приказ администрации). Постоянная
+    # смена группы остаётся в shift_info, здесь — действующая на дату.
+    shift: Optional[int] = Field(
+        None,
+        description="Смена, действующая на запрошенную дату (1 или 2)",
+    )
+    classroom: Optional[str] = Field(
+        None,
+        description="Кабинет группы на период; пусто — не закреплён",
+    )
+    building: Optional[int] = Field(
+        None,
+        description="Корпус на период (например, 2)",
+    )
+    classroom_note: Optional[str] = Field(
+        None,
+        description="Пометка вместо номера кабинета: «ПП» (практика) или «ДО» (дистанционно)",
+    )
     updated_at: Optional[datetime] = Field(
         None,
         description="Дата и время последнего обновления расписания",
