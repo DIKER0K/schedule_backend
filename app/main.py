@@ -26,7 +26,12 @@ async def ensure_schedule_indexes():
                 await db.schedules.drop_index(name)
                 logger.info("Снят устаревший уникальный индекс schedules.%s", name)
     except Exception as exc:  # индексов ещё нет (новая база) — это нормально
-        logger.info("Старые индексы schedules не проверены: %s", exc)
+        logger.warning(
+            "Старые индексы schedules не проверены (%s). Если устаревший "
+            "уникальный индекс по group_name остался, загрузка второй версии "
+            "расписания упадёт с DuplicateKeyError.",
+            exc,
+        )
 
     await db.schedules.create_index(
         [("group_name", 1), ("valid_from", 1)],
