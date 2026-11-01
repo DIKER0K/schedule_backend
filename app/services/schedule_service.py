@@ -1,3 +1,4 @@
+import copy
 from datetime import datetime
 from fastapi import HTTPException, UploadFile
 from app.database import db
@@ -142,7 +143,7 @@ class ScheduleService:
             current.time = time
 
     @staticmethod
-    def apply_today_bells(schedule_data: dict, shift: int):
+    def apply_today_bells(schedule_data: dict, shift: int, at: str | None = None):
         """Подставляет сегодняшние звонки в расписание, если на дату есть приказ.
 
         Приказ администрации («2 ноября звонки такие») меняет сетку дня целиком,
@@ -150,11 +151,19 @@ class ScheduleService:
         подменяем время пар сегодняшнего дня, не трогая базу: завтра расписание
         снова обычное.
         """
-        grid, note = today_bells(shift)
+        grid, note = today_bells(shift, at)
         if not grid:
             return schedule_data, note
 
-        today_name = WEEKDAY_TO_RU[datetime.now(TZ).weekday()]
+        # Свой экземпляр: подмена не должна менять документ вызывающего
+        schedule_data = copy.deepcopy(schedule_data)
+
+        moment = (
+            datetime.fromisoformat(at).replace(tzinfo=TZ)
+            if at
+            else datetime.now(TZ)
+        )
+        today_name = WEEKDAY_TO_RU[moment.weekday()]
         days = schedule_data.get("days") or {}
         for dname, lessons in days.items():
             if normalize_day_name(dname) != normalize_day_name(today_name):
