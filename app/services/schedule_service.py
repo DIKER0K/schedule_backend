@@ -16,6 +16,33 @@ from app.services.schedule_parser import (
 )
 from app.utils.common import normalize_day_name, normalize_name, serialize_doc
 from app.services.bell_service import apply_bell_schedule_from_files
+from app.services.next_bell_service import (
+    TZ,
+    WEEKDAY_TO_BELL_KEY,
+    WEEKDAY_TO_RU,
+    _date_note,
+    _date_overrides,
+)
+
+
+def today_bells(shift: int = 1, at: str | None = None):
+    """Звонки на сегодня по разовому правилу: ({номер пары: "HH:MM–HH:MM"}, объявление).
+
+    Разовое правило на дату (приказ администрации) задаёт полную сетку дня,
+    поэтому его сетка используется как есть. Если правила на сегодня нет —
+    возвращаются пустые значения и расписание остаётся обычным.
+    """
+    from datetime import datetime as _dt
+
+    now = _dt.fromisoformat(at) if at else _dt.now(TZ)
+    date_key = now.strftime("%Y-%m-%d")
+    dated = (_date_overrides().get(date_key) or {}).get(f"{shift}_shift") or {}
+    grid = {
+        str(number): str(span)
+        for number, span in dated.items()
+        if str(number) not in ("note", "source")
+    }
+    return grid, _date_note(date_key)
 
 
 class ScheduleService:
@@ -115,6 +142,32 @@ class ScheduleService:
             current.time = time
 
     @staticmethod
+    def apply_today_bells(schedule_data: dict, shift: int):
+        """Подставляет сегодняшние звонки в расписание, если на дату есть приказ.
+
+        Приказ администрации («2 ноября звонки такие») меняет сетку дня целиком,
+        а время пар в базе привязано к обычному дню недели. Поэтому на выдаче
+        подменяем время пар сегодняшнего дня, не трогая базу: завтра расписание
+        снова обычное.
+        """
+        grid, note = today_bells(shift)
+        if not grid:
+            return schedule_data, note
+
+        today_name = WEEKDAY_TO_RU[datetime.now(TZ).weekday()]
+        days = schedule_data.get("days") or {}
+        for dname, lessons in days.items():
+            if normalize_day_name(dname) != normalize_day_name(today_name):
+                continue
+            for number, lesson in lessons.items():
+                if not isinstance(lesson, dict):
+                    continue
+                span = grid.get(str(number).split(".")[0].strip())
+                if span:
+                    lesson["time"] = span
+        return schedule_data, note
+
+    @staticmethod
     async def get_all_schedules():
         schedules = await db.schedules.find().to_list(100)
         return [Schedule(**serialize_doc(s)) for s in schedules]
@@ -146,11 +199,15 @@ class ScheduleService:
                     sorted_days[dname] = ScheduleService.sort_lessons_by_number(lessons)
                 full_schedule["days"] = sorted_days
 
+            full_schedule, day_note = ScheduleService.apply_today_bells(
+                full_schedule, int(shift_info.get("shift") or 1)
+            )
             return Schedule(
                 group_name=group_name,
                 shift_info=shift_info,
                 updated_at=schedule.get("updated_at"),
                 schedule=full_schedule,
+                note=day_note,
             )
 
         normalized_day = normalize_day_name(day)
@@ -178,12 +235,16 @@ class ScheduleService:
                 detail=f"У группы '{group_name}' нет занятий в день '{day}'",
             )
 
+        filtered_schedule, day_note = ScheduleService.apply_today_bells(
+            filtered_schedule, int(shift_info.get("shift") or 1)
+        )
         return {
             "group_name": group_name,
             "shift_info": shift_info,
             "day": day,
             "schedule": filtered_schedule,
             "updated_at": schedule.get("updated_at"),
+            "note": day_note,
         }
 
     @staticmethod
