@@ -1,3 +1,4 @@
+from datetime import date
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 
@@ -14,11 +15,20 @@ class ParallelLesson(BaseModel):
     group: str
     classroom: Optional[str] = None
 
+    # «ПП» / «ДО» вместо номера: в приказе на период у группы не кабинет, а
+    # пометка (практика / дистанционно).
+    classroom_note: Optional[str] = None
+
 
 class TeacherLesson(BaseModel):
     subject: str
     group: str
     classroom: Optional[str]
+
+    # Пометка вместо номера кабинета («ПП» — практика, «ДО» — дистанционно),
+    # когда у версии группы кабинета нет.
+    classroom_note: Optional[str] = None
+
     time: Optional[str] = None
 
     # Другие группы, у которых в это же время пара с этим же преподавателем.
@@ -38,4 +48,7 @@ class TeacherShiftSchedule(BaseModel):
 class TeacherScheduleResponse(BaseModel):
     teacher_fio: str
     filtered_by_day: Optional[str] = None
+    # Дата, на которую выбран распорядок: и версия расписания, и время пар
+    # зависят от неё, а не от «сегодня».
+    requested_date: Optional[date] = None
     schedule: TeacherShiftSchedule

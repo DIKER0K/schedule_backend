@@ -1,5 +1,5 @@
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from fastapi import HTTPException, UploadFile
 from app.database import db
 from app.models.schedule import Schedule
@@ -59,6 +59,61 @@ def group_sort_key(doc: dict) -> tuple:
     return (int(head) if head else 999, name.casefold())
 
 
+def iter_schedule_lessons(schedule_data: dict):
+    """Пары расписания по одной: (день недели, номер пары, данные пары).
+
+    Нулевая пара идёт с номером «0» — так же, как она приходит в ответе
+    преподавателю.
+    """
+    for day_name, zero in (schedule_data.get("zero_lesson") or {}).items():
+        if zero:
+            yield day_name, "0", zero
+    for day_name, lessons in (schedule_data.get("days") or {}).items():
+        for num, info in (lessons or {}).items():
+            if info:
+                yield day_name, str(num), info
+
+
+def day_in_week(day_name: str, week_start: date) -> date | None:
+    """Дата дня недели внутри недели, начинающейся с `week_start` (понедельник)."""
+    normalized = normalize_day_name(day_name)
+    for index, name in WEEKDAY_TO_RU.items():
+        if normalize_day_name(name) == normalized:
+            return week_start + timedelta(days=index)
+    return None
+
+
+def coerce_shift(value) -> int | None:
+    """Номер смены из базы или запроса. Пустое значение — None."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def lesson_place(info: dict, distribution: dict) -> tuple:
+    """Кабинет пары: свой кабинет → кабинет группы из версии → пометка.
+
+    В приказе на период кабинет закреплён за ГРУППОЙ (`classroom` версии), а в
+    самих парах его нет — без подстановки у преподавателя все пары оставались
+    без кабинетов. Если вместо номера в приказе пометка «ПП» / «ДО», она
+    показывается вместо кабинета: у этих групп пары идут на практике или
+    дистанционно.
+    """
+    classroom = str(info.get("classroom") or "").strip()
+    if classroom:
+        return classroom, None
+
+    group_classroom = str((distribution or {}).get("classroom") or "").strip()
+    if group_classroom:
+        return group_classroom, None
+
+    note = str((distribution or {}).get("classroom_note") or "").strip()
+    return None, (note.upper() or None)
+
+
 
 def today_bells(shift: int = 1, at: str | None = None):
     """Звонки на сегодня по разовому правилу: ({номер пары: "HH:MM–HH:MM"}, объявление).
@@ -110,6 +165,7 @@ class ScheduleService:
         subject: str,
         classroom,
         time,
+        classroom_note=None,
     ) -> None:
         """Кладёт пару преподавателя в слот дня, не теряя параллельные группы.
 
@@ -133,6 +189,7 @@ class ScheduleService:
                 subject=subject,
                 group=group_name,
                 classroom=classroom,
+                classroom_note=classroom_note,
                 time=time,
             )
             return
@@ -151,12 +208,14 @@ class ScheduleService:
                 subject=subject,
                 group=group_name,
                 classroom=classroom,
+                classroom_note=classroom_note,
                 time=time,
                 parallels=[
                     ParallelLesson(
                         subject=current.subject,
                         group=current.group,
                         classroom=current.classroom,
+                        classroom_note=current.classroom_note,
                     ),
                     *current.parallels,
                 ],
@@ -165,7 +224,10 @@ class ScheduleService:
 
         # обычный случай — уводим группу в параллели
         parallel = ParallelLesson(
-            subject=subject, group=group_name, classroom=classroom
+            subject=subject,
+            group=group_name,
+            classroom=classroom,
+            classroom_note=classroom_note,
         )
         for existing in current.parallels:
             if existing.group == group_name:
@@ -243,6 +305,25 @@ class ScheduleService:
                     if span:
                         lesson["time"] = span
         return schedule_data
+
+    @staticmethod
+    def apply_week_bell_grid(schedule_data: dict, week_start: date, shift_on):
+        """Время пар по сетке звонков смены группы на каждый день недели.
+
+        `shift_on(дата)` возвращает номер смены группы на дату: по приказу на
+        период группа может уехать во вторую смену, и тогда время пар берётся
+        из сетки второй смены на этот день, а не из той, что проставлена при
+        загрузке расписания. День недели без даты (например, воскресенье)
+        остаётся как есть.
+        """
+        result = schedule_data
+        for offset in range(6):  # понедельник–суббота: в воскресенье пар нет
+            day = week_start + timedelta(days=offset)
+            shift = shift_on(day)
+            if shift not in (1, 2):
+                continue
+            result = ScheduleService.apply_shift_bell_grid(result, shift, day)
+        return result
 
     @staticmethod
     async def get_all_schedules():
@@ -786,12 +867,27 @@ class ScheduleService:
         }
 
     @staticmethod
-    async def get_teacher_schedule(fio: str, day: str | None):
-        """
-        Гибкий поиск расписания преподавателя.
-        Теперь возвращает разные ошибки:
-        - 404: преподаватель не найден вообще;
-        - 204: преподаватель найден, но в указанный день у него нет пар.
+    async def get_teacher_schedule(
+        fio: str, day: str | None, date_value: date | None = None
+    ):
+        """Расписание преподавателя на дату (по умолчанию — сегодня).
+
+        Версия расписания выбирается по запрошенной дате, как и у группы: 2–3
+        ноября действует приказ (другая смена, кабинеты и время пар), а
+        остальные дни продолжают браться из прежней версии. Если в версии,
+        действующей на дату, нужного дня нет пар, день берётся из предыдущей
+        (`resolve_day`) — иначе новая версия «стирала» бы остальную неделю.
+
+        Время пар — по сетке звонков смены группы на этот день, кабинет — из
+        пары, а если его там нет, из версии группы (в приказе кабинет закреплён
+        за группой). Пометки «ПП» / «ДО» отдаются вместо номера кабинета.
+
+        Ошибки:
+        - 400: пустое ФИО;
+        - 404: преподавателя нет ни в одной версии расписания;
+        - 404: расписание на дату ещё не опубликовано (у всех групп версии
+          начинаются позже);
+        - 204: преподаватель есть, но в указанный день у него нет пар.
         """
         fio = fio.strip()
         if not fio:
@@ -801,104 +897,112 @@ class ScheduleService:
 
         fio_normalized = normalize_name(fio)
         normalized_day = normalize_day_name(day) if day else None
+        day_date = date_value or today()
+
+        def match_teacher(teacher: str) -> bool:
+            if not teacher:
+                return False
+            t_norm = normalize_name(teacher)
+            return fio_normalized in t_norm or t_norm in fio_normalized
 
         docs = await db.schedules.find().to_list(None)
 
-        # По одной записи на группу — версия, действующая сегодня: иначе пары
-        # из разных версий складывались бы в параллели друг друга.
-        #
-        # Устойчивый порядок обхода. Раньше он зависел от порядка документов в
-        # Mongo, поэтому «основной» группой в параллели становилась случайная
-        # (и менялась от запроса к запросу). Сортируем по имени группы, чтобы
-        # одна и та же пара всегда отдавалась одинаково.
-        schedules = sorted(latest_per_group(docs, today()), key=group_sort_key)
-
-        teacher_found_anywhere = False
-        first_shift: dict[str, dict] = {}
-        second_shift: dict[str, dict] = {}
-
-        def coerce_shift(v):
-            if v is None or v == "":
-                return None
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                return None
-
-        def pick_shift_target(raw_shift_value):
-            shift_value = coerce_shift(raw_shift_value)
-
-            if shift_value == 0:
-                return None  # скрытая группа
-
-            if shift_value is None:
-                shift_value = 1  # дефолт — 1-я смена
-
-            if shift_value == 1:
-                return first_shift
-            if shift_value == 2:
-                return second_shift
-
-            return None
-
-        # --- Поиск занятий преподавателя с учетом смен ---
-        for s in schedules:
-            group_name = s.get("group_name")
-            schedule_data = s.get("schedule", {})
-            if not schedule_data:
-                continue
-
-            raw_shift = (s.get("shift_info") or {}).get("shift", 1)
-            shift_target = pick_shift_target(raw_shift)
-            if shift_target is None:
-                continue
-
-            def match_teacher(teacher: str) -> bool:
-                if not teacher:
-                    return False
-                t_norm = normalize_name(teacher)
-                return fio_normalized in t_norm or t_norm in fio_normalized
-
-            # нулевая пара
-            for day_name, zero in (schedule_data.get("zero_lesson") or {}).items():
-                if zero and match_teacher(zero.get("teacher", "")):
-                    teacher_found_anywhere = True
-                    if (
-                        not normalized_day
-                        or normalize_day_name(day_name) == normalized_day
-                    ):
-                        shift_target.setdefault(day_name, {})
-                        ScheduleService._put_lesson(
-                            shift_target[day_name],
-                            "0",
-                            group_name,
-                            zero.get("subject", ""),
-                            zero.get("classroom", ""),
-                            zero.get("time"),
-                        )
-
-            # обычные пары
-            for day_name, lessons in (schedule_data.get("days") or {}).items():
-                for num, info in (lessons or {}).items():
-                    if info and match_teacher(info.get("teacher", "")):
-                        teacher_found_anywhere = True
-                        if (
-                            not normalized_day
-                            or normalize_day_name(day_name) == normalized_day
-                        ):
-                            shift_target.setdefault(day_name, {})
-                            ScheduleService._put_lesson(
-                                shift_target[day_name],
-                                num,
-                                group_name,
-                                info.get("subject", ""),
-                                info.get("classroom", ""),
-                                info.get("time"),
-                            )
-
+        # Преподаватель ищется по всем версиям: «не найден» — это не про дату,
+        # иначе опечатка в ФИО выглядела бы как «расписание не опубликовано».
+        teacher_found_anywhere = any(
+            match_teacher(info.get("teacher", ""))
+            for doc in docs
+            for _, _, info in iter_schedule_lessons(doc.get("schedule") or {})
+        )
         if not teacher_found_anywhere:
             raise HTTPException(
                 status_code=404, detail=f"Преподаватель '{fio}' не найден в расписании"
+            )
+
+        by_group: dict[str, list] = {}
+        for doc in docs:
+            by_group.setdefault(doc.get("group_name"), []).append(doc)
+
+        week_start = day_date - timedelta(days=day_date.weekday())
+        first_shift: dict[str, dict] = {}
+        second_shift: dict[str, dict] = {}
+        published = False
+
+        # Устойчивый порядок обхода: иначе «основной» группой в параллели
+        # становилась случайная (порядок документов в Mongo не гарантирован).
+        for group_name in sorted(
+            by_group, key=lambda name: group_sort_key({"group_name": name or ""})
+        ):
+            group_docs = by_group[group_name]
+
+            # Версии, действующие на дату. Пусто — расписание группы на эту
+            # дату ещё не выложено, группа в ответ не попадает.
+            versions = applicable_versions(group_docs, day_date)
+            if not versions:
+                continue
+            published = True
+
+            base_shift = coerce_shift(
+                (versions[0].get("shift_info") or {}).get("shift")
+            )
+            if base_shift is None:
+                base_shift = 1
+
+            def shift_on(group_day: date) -> int | None:
+                """Смена группы на дату: по приказу на период, иначе обычная."""
+                found = coerce_shift(
+                    distribution_on_date(group_docs, group_day)["shift"]
+                )
+                return base_shift if found is None else found
+
+            shift_today = shift_on(day_date)
+            if shift_today not in (1, 2):
+                continue  # 0 — группа скрыта из выдачи
+            shift_target = first_shift if shift_today == 1 else second_shift
+
+            if normalized_day:
+                resolved = resolve_day(versions, day or "")
+                if resolved is None:
+                    continue
+                group_schedule = resolved[1]
+            else:
+                group_schedule = merge_week(versions)
+
+            # Время пар — по сетке звонков своей смены: 2–3 ноября часть групп
+            # учится во вторую смену, и время берётся из её сетки.
+            group_schedule = ScheduleService.apply_week_bell_grid(
+                group_schedule, week_start, shift_on
+            )
+
+            for day_name, num, info in iter_schedule_lessons(group_schedule):
+                if not match_teacher(info.get("teacher", "")):
+                    continue
+                if normalized_day and normalize_day_name(day_name) != normalized_day:
+                    continue
+
+                # Смена и кабинет — по дате самого дня: в недельной выдаче дни
+                # периода приказа живут по приказу, остальные — по обычной сетке.
+                lesson_day = day_in_week(day_name, week_start)
+                distribution = (
+                    distribution_on_date(group_docs, lesson_day) if lesson_day else {}
+                )
+                classroom, classroom_note = lesson_place(info, distribution)
+
+                shift_target.setdefault(day_name, {})
+                ScheduleService._put_lesson(
+                    shift_target[day_name],
+                    num,
+                    group_name,
+                    info.get("subject", ""),
+                    classroom,
+                    info.get("time"),
+                    classroom_note=classroom_note,
+                )
+
+        if not published:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Расписание на {fmt_date(day_date)} ещё не опубликовано",
             )
 
         # Если фильтровали по дню и ничего не попало в обе смены:
@@ -926,6 +1030,7 @@ class ScheduleService:
         return TeacherScheduleResponse(
             teacher_fio=fio,
             filtered_by_day=day if day else None,
+            requested_date=day_date,
             schedule=TeacherShiftSchedule(
                 first_shift=first_shift, second_shift=second_shift
             ),

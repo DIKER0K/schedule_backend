@@ -191,7 +191,12 @@ async def delete_schedule(group_name: str):
     summary="Получить расписание преподавателя",
     description=(
         "Возвращает расписание для указанного преподавателя. "
-        "Можно указать параметр `day`, чтобы получить только занятия на выбранный день."
+        "Можно указать параметр `day`, чтобы получить только занятия на выбранный день. "
+        "Параметр `date` (YYYY-MM-DD) выбирает версию расписания каждой группы, "
+        "действующую на эту дату; по умолчанию — сегодня по Asia/Yekaterinburg. "
+        "Смена, кабинет и время пар берутся из этой версии: если у пары нет своего "
+        "кабинета, подставляется кабинет группы (или пометка «ПП» / «ДО»), а время "
+        "считается по сетке звонков смены группы на этот день."
     ),
     response_description="Расписание преподавателя по дням и сменам."
 )
@@ -200,6 +205,14 @@ async def get_teacher_schedule(
     day: str | None = Query(
         None,
         description="Необязательно: день недели (например, 'Понедельник', 'Вт', 'Mon')."
-    )
+    ),
+    date_param: date | None = Query(
+        None,
+        alias="date",
+        description=(
+            "Необязательно: дата, на которую нужно расписание (YYYY-MM-DD). "
+            "По умолчанию — сегодня по Asia/Yekaterinburg."
+        ),
+    ),
 ):
-    return await ScheduleService.get_teacher_schedule(fio, day)
+    return await ScheduleService.get_teacher_schedule(fio, day, date_param)
