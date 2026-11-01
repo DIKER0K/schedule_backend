@@ -1,8 +1,9 @@
 import asyncio
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from app.routers import bell_schedule, users, schedule, ai, next_bell
+from app.routers import bell_schedule, users, schedule, ai, next_bell, holidays
 from app.database import db
+from app.services.holidays_service import ensure_holiday_indexes, seed_holidays
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
@@ -46,6 +47,9 @@ async def lifespan(app: FastAPI):
 
     # создаём индексы Mongo
     await ensure_schedule_indexes()
+    await ensure_holiday_indexes()
+    # список нерабочих дней учебного года — разовая миграция
+    await seed_holidays()
     await db.users.create_index("user_id", unique=True)
 
     yield
@@ -72,6 +76,7 @@ app.include_router(
 )
 app.include_router(ai.router, prefix="/ai", tags=["ai"])
 app.include_router(next_bell.router, prefix="", tags=["Next bell"])
+app.include_router(holidays.router, prefix="/holidays", tags=["Holidays"])
 
 
 @app.get("/")

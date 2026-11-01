@@ -19,6 +19,7 @@ def fake_db(monkeypatch):
     """Коллекция расписаний — mongomock вместо Motor, звонки из файлов не читаем."""
     import app.main as main_module
     import app.services.bell_service as bell_service
+    import app.services.holidays_service as holidays_service
     import app.services.schedule_parser as parser
     import app.services.schedule_service as schedule_service
     from mongomock_motor import AsyncMongoMockClient
@@ -27,6 +28,7 @@ def fake_db(monkeypatch):
     monkeypatch.setattr(schedule_service, "db", database)
     monkeypatch.setattr(parser, "db", database)
     monkeypatch.setattr(bell_service, "db", database)
+    monkeypatch.setattr(holidays_service, "db", database)
     monkeypatch.setattr(main_module, "db", database)
 
     async def _skip_bell_files():

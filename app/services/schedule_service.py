@@ -17,6 +17,7 @@ from app.services.schedule_parser import (
 )
 from app.utils.common import normalize_day_name, normalize_name
 from app.services.bell_service import apply_bell_schedule_from_files
+from app.services.holidays_service import fmt_day_month, holiday_on
 from app.services.classroom_distribution import (
     distribution_on_date,
     distribution_period,
@@ -293,6 +294,7 @@ class ScheduleService:
 
         Ошибки:
         - 404: группы нет в базе;
+        - 404: дата — нерабочий день (приказ «4 ноября — выходной»);
         - 404: расписание на дату ещё не опубликовано (все версии начинаются
           позже либо нужного дня нет ни в одной версии).
         """
@@ -301,6 +303,14 @@ class ScheduleService:
         if not docs:
             raise HTTPException(
                 status_code=404, detail=f"Группа '{group_name}' не найдена"
+            )
+
+        # Нерабочий день важнее вопроса «опубликовано ли расписание»: занятий
+        # в этот день нет по приказу, а не потому, что версию не загрузили.
+        if await holiday_on(day_date):
+            raise HTTPException(
+                status_code=404,
+                detail=f"{fmt_day_month(day_date)} — выходной, занятий нет",
             )
 
         versions = applicable_versions(docs, day_date)
