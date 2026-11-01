@@ -1,5 +1,5 @@
 import copy
-from datetime import datetime
+from datetime import date, datetime
 from fastapi import HTTPException, UploadFile
 from app.database import db
 from app.models.schedule import Schedule
@@ -13,9 +13,9 @@ from app.models.teacher_schedule import (
 from app.services.schedule_parser import (
     add_classrooms_to_schedule,
     load_group_shifts,
-    parse_schedule_from_docx,
+    parse_schedule_document,
 )
-from app.utils.common import normalize_day_name, normalize_name, serialize_doc
+from app.utils.common import normalize_day_name, normalize_name
 from app.services.bell_service import apply_bell_schedule_from_files
 from app.services.next_bell_service import (
     TZ,
@@ -24,6 +24,31 @@ from app.services.next_bell_service import (
     _date_note,
     _date_overrides,
 )
+from app.services.schedule_versions import (
+    applicable_versions,
+    coerce_date,
+    fmt_date,
+    latest_per_group,
+    merge_week,
+    mongo_date,
+    parse_requested_date,
+    resolve_day,
+    today,
+    version_end,
+)
+
+
+def group_sort_key(doc: dict) -> tuple:
+    """Порядок групп в выдаче: по числу в начале названия, затем по алфавиту."""
+    name = (doc.get("group_name") or "").strip()
+    head = ""
+    for char in name:
+        if char.isdigit():
+            head += char
+        else:
+            break
+    return (int(head) if head else 999, name.casefold())
+
 
 
 def today_bells(shift: int = 1, at: str | None = None):
@@ -178,97 +203,142 @@ class ScheduleService:
 
     @staticmethod
     async def get_all_schedules():
-        schedules = await db.schedules.find().to_list(100)
-        return [Schedule(**serialize_doc(s)) for s in schedules]
+        """Все группы по одной записи: версия расписания, действующая сегодня."""
+        docs = await db.schedules.find().to_list(None)
+        day = today()
+        current = sorted(latest_per_group(docs, day), key=group_sort_key)
+        return [
+            Schedule(
+                group_name=doc.get("group_name"),
+                shift_info=doc.get("shift_info") or {},
+                updated_at=doc.get("updated_at"),
+                schedule=doc.get("schedule") or {},
+                valid_from=coerce_date(doc.get("valid_from")),
+                valid_to=version_end(doc),
+                requested_date=day,
+            )
+            for doc in current
+        ]
 
     @staticmethod
-    async def get_schedule_by_group(group_name: str, day: str | None):
+    async def get_schedule_by_group(
+        group_name: str, day: str | None, date_value: date | None = None
+    ):
         """
-        Возвращает расписание группы.
+        Возвращает расписание группы на дату (по умолчанию — сегодня).
+
+        Версия выбирается по дате: самая поздняя, которая уже началась
+        (`valid_from <= дата`). Если в ней запрошенного дня нет пар, день берётся
+        из предыдущей версии — так новый приказ на 2–3 ноября не стирает
+        остальную неделю.
+
         Ошибки:
-        - 404: группа не найдена;
-        - 204/404: группа есть, но в этот день нет пар.
+        - 404: группы нет в базе;
+        - 404: расписание на дату ещё не опубликовано (все версии начинаются
+          позже либо нужного дня нет ни в одной версии).
         """
-        schedule = await db.schedules.find_one({"group_name": group_name})
-        if not schedule:
+        day_date = date_value or today()
+        docs = await db.schedules.find({"group_name": group_name}).to_list(None)
+        if not docs:
             raise HTTPException(
                 status_code=404, detail=f"Группа '{group_name}' не найдена"
             )
 
-        schedule = serialize_doc(schedule)
-        shift_info = schedule.get("shift_info", {})
+        versions = applicable_versions(docs, day_date)
+        if not versions:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Расписание на {fmt_date(day_date)} ещё не опубликовано",
+            )
+
+        newest = versions[0]
+        shift_info = newest.get("shift_info") or {}
+        shift = int(shift_info.get("shift") or 1)
+        # Тот же момент, что и запрошенная дата: время пар подменяется по приказу
+        # на эту дату, а не на сегодняшнюю.
+        at = f"{day_date.isoformat()}T12:00"
 
         if not day:
-            # Если день не указан, возвращаем всё расписание (тоже отсортированное)
-            full_schedule = schedule.get("schedule", {})
-            # Сортируем дни внутри расписания
-            if "days" in full_schedule:
-                sorted_days = {}
-                for dname, lessons in full_schedule["days"].items():
-                    sorted_days[dname] = ScheduleService.sort_lessons_by_number(lessons)
-                full_schedule["days"] = sorted_days
+            full_schedule = merge_week(versions)
+            for dname, lessons in full_schedule["days"].items():
+                full_schedule["days"][dname] = ScheduleService.sort_lessons_by_number(
+                    lessons
+                )
 
             full_schedule, day_note = ScheduleService.apply_today_bells(
-                full_schedule, int(shift_info.get("shift") or 1)
+                full_schedule, shift, at
             )
             return Schedule(
                 group_name=group_name,
                 shift_info=shift_info,
-                updated_at=schedule.get("updated_at"),
+                updated_at=newest.get("updated_at"),
                 schedule=full_schedule,
+                valid_from=coerce_date(newest.get("valid_from")),
+                valid_to=version_end(newest),
+                requested_date=day_date,
                 note=day_note,
             )
 
-        normalized_day = normalize_day_name(day)
-        schedule_data = schedule.get("schedule", {})
-        filtered_schedule = {}
-
-        # фильтрация
-        zero = schedule_data.get("zero_lesson", {})
-        for dname, info in zero.items():
-            if normalize_day_name(dname) == normalized_day:
-                filtered_schedule["zero_lesson"] = {dname: info}
-
-        days = schedule_data.get("days", {})
-        for dname, lessons in days.items():
-            if normalize_day_name(dname) == normalized_day:
-                # === ИСПРАВЛЕНИЕ: Сортируем пары перед возвратом ===
-                sorted_lessons = ScheduleService.sort_lessons_by_number(lessons)
-                filtered_schedule["days"] = {dname: sorted_lessons}
-                break
-
-        # ❗ Если группа есть, но в этот день нет пар
-        if not filtered_schedule:
+        resolved = resolve_day(versions, day)
+        if resolved is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"У группы '{group_name}' нет занятий в день '{day}'",
+                detail=(
+                    f"Расписание на {fmt_date(day_date)} ещё не опубликовано: "
+                    f"в день '{day}' пар нет ни в одной версии"
+                ),
+            )
+
+        source, filtered_schedule = resolved
+        for dname, lessons in filtered_schedule.get("days", {}).items():
+            filtered_schedule["days"][dname] = ScheduleService.sort_lessons_by_number(
+                lessons
             )
 
         filtered_schedule, day_note = ScheduleService.apply_today_bells(
-            filtered_schedule, int(shift_info.get("shift") or 1)
+            filtered_schedule, shift, at
         )
         return {
             "group_name": group_name,
             "shift_info": shift_info,
             "day": day,
             "schedule": filtered_schedule,
-            "updated_at": schedule.get("updated_at"),
+            "updated_at": source.get("updated_at"),
             "note": day_note,
+            "valid_from": coerce_date(source.get("valid_from")),
+            "valid_to": version_end(source),
+            "requested_date": day_date,
         }
 
     @staticmethod
     async def upload_schedule(
-        schedule_file: UploadFile, shifts_file: UploadFile | None
+        schedule_file: UploadFile,
+        shifts_file: UploadFile | None,
+        valid_from: str | None = None,
+        replace_all: bool = False,
     ):
         """
-        Загружает файл .docx, парсит его и сохраняет расписания в MongoDB.
+        Загружает файл .docx, парсит его и записывает как ВЕРСИЮ расписания.
         Если передан также файл group_shifts.json — он обновляется вместе с расписанием.
-        Старые записи полностью очищаются.
+
+        Дата начала версии берётся из заголовка документа
+        («Расписание уроков для 9-1 группы с 02.11.2026 г.»), а для групп без
+        даты в заголовке — из параметра `valid_from`. Версия пишется по паре
+        (group_name, valid_from): повторная загрузка файла с той же датой
+        заменяет её, остальные версии остаются. `replace_all=True` сносит
+        прежние версии групп, которые есть в файле.
         """
         import os, json
 
         if not schedule_file.filename.lower().endswith(".docx"):
             raise HTTPException(status_code=400, detail="Нужен DOCX файл расписания")
+
+        try:
+            request_date = parse_requested_date(valid_from)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Не удалось разобрать valid_from: {exc}"
+            )
 
         temp_docx = f"temp_{datetime.now().timestamp()}.docx"
         temp_json = None
@@ -293,17 +363,34 @@ class ScheduleService:
                 print(f"✅ Обновлён файл group_shifts.json ({len(new_shifts)} групп)")
 
             # парсим документ
-            data = parse_schedule_from_docx(temp_docx)
+            data, title_dates = parse_schedule_document(temp_docx)
             if not data:
                 raise HTTPException(
                     status_code=400, detail="Не удалось распарсить расписание"
                 )
 
+            # дата начала по каждой группе
+            starts = {}
+            without_date = []
+            for group in data:
+                group_start = title_dates.get(group) or request_date
+                if group_start is None:
+                    without_date.append(group)
+                else:
+                    starts[group] = group_start
+
+            if without_date:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Не удалось определить дату начала: укажите valid_from "
+                        "(в заголовке файла нет даты для групп: "
+                        f"{', '.join(sorted(without_date))})"
+                    ),
+                )
+
             # загружаем смены (уже обновлённые)
             shifts = load_group_shifts()
-
-            # очищаем старое расписание
-            await db.schedules.delete_many({})
 
             inserted = []
             first_shift_count = 0
@@ -322,28 +409,69 @@ class ScheduleService:
                     schedule, group, shifts
                 )
 
+                start = starts[group]
+                stored_start = mongo_date(start)
                 doc = {
                     "group_name": group,
                     "schedule": schedule_with_classrooms,
                     "shift_info": shift_info,
                     "updated_at": datetime.now(),
+                    "valid_from": stored_start,
+                    "valid_to": None,
                 }
-                result = await db.schedules.insert_one(doc)
-                inserted.append(str(result.inserted_id))
+
+                if replace_all:
+                    # файл действительно полный: прежние версии группы не нужны
+                    await db.schedules.delete_many({"group_name": group})
+                    result = await db.schedules.insert_one(doc)
+                    inserted.append(str(result.inserted_id))
+                    continue
+
+                result = await db.schedules.update_one(
+                    {"group_name": group, "valid_from": stored_start},
+                    {"$set": doc},
+                    upsert=True,
+                )
+                if result.upserted_id is not None:
+                    inserted.append(str(result.upserted_id))
+                else:
+                    existing = await db.schedules.find_one(
+                        {"group_name": group, "valid_from": stored_start}
+                    )
+                    if existing:
+                        inserted.append(str(existing["_id"]))
 
             await apply_bell_schedule_from_files()
 
+            dates = sorted({start for start in starts.values()})
+            dates_text = (
+                fmt_date(dates[0])
+                if len(dates) == 1
+                else " и ".join(fmt_date(d) for d in dates)
+            )
+            message = (
+                f"✅ Расписание с {dates_text} загружено для {len(inserted)} групп "
+                f"({first_shift_count} — 1 смена, {second_shift_count} — 2 смена)"
+            )
+            if replace_all:
+                message += ". Прежние версии этих групп удалены"
+
+            total_versions = await db.schedules.count_documents({})
+
             return UploadResponse(
-                message=(
-                    f"✅ Расписание загружено для {len(inserted)} групп "
-                    f"({first_shift_count} — 1 смена, {second_shift_count} — 2 смена)"
-                ),
+                message=message,
                 inserted_ids=inserted,
                 total_groups=len(inserted),
                 first_shift=first_shift_count,
                 second_shift=second_shift_count,
+                valid_from=dates[0] if len(dates) == 1 else None,
+                total_versions=total_versions,
+                replace_all=replace_all,
+                dates={group: start.isoformat() for group, start in starts.items()},
             )
 
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(
                 status_code=500, detail=f"Ошибка при обработке файлов: {e}"
@@ -356,10 +484,14 @@ class ScheduleService:
 
     @staticmethod
     async def delete_schedule(group_name: str):
-        result = await db.schedules.delete_one({"group_name": group_name})
+        """Удаляет группу совсем — все версии её расписания."""
+        result = await db.schedules.delete_many({"group_name": group_name})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Schedule not found")
-        return {"message": f"Schedule for '{group_name}' deleted"}
+        return {
+            "message": f"Schedule for '{group_name}' deleted",
+            "deleted_versions": result.deleted_count,
+        }
 
     @staticmethod
     async def get_teacher_schedule(fio: str, day: str | None):
@@ -378,23 +510,16 @@ class ScheduleService:
         fio_normalized = normalize_name(fio)
         normalized_day = normalize_day_name(day) if day else None
 
-        schedules = await db.schedules.find().to_list(1000)
+        docs = await db.schedules.find().to_list(None)
 
+        # По одной записи на группу — версия, действующая сегодня: иначе пары
+        # из разных версий складывались бы в параллели друг друга.
+        #
         # Устойчивый порядок обхода. Раньше он зависел от порядка документов в
         # Mongo, поэтому «основной» группой в параллели становилась случайная
         # (и менялась от запроса к запросу). Сортируем по имени группы, чтобы
         # одна и та же пара всегда отдавалась одинаково.
-        def _group_sort_key(doc):
-            name = (doc.get("group_name") or "").strip()
-            head = ""
-            for ch in name:
-                if ch.isdigit():
-                    head += ch
-                else:
-                    break
-            return (int(head) if head else 999, name.casefold())
-
-        schedules = sorted(schedules, key=_group_sort_key)
+        schedules = sorted(latest_per_group(docs, today()), key=group_sort_key)
 
         teacher_found_anywhere = False
         first_shift: dict[str, dict] = {}
