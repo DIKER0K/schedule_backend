@@ -18,10 +18,10 @@ from app.services.schedule_parser import (
 from app.utils.common import normalize_day_name, normalize_name
 from app.services.bell_service import apply_bell_schedule_from_files
 from app.services.classroom_distribution import (
-    distribution_for,
+    distribution_on_date,
     distribution_period,
     parse_distribution_document,
-    version_for_period,
+    versions_for_period,
 )
 from app.services.next_bell_service import (
     TZ,
@@ -249,10 +249,18 @@ class ScheduleService:
         """Все группы по одной записи: версия расписания, действующая сегодня."""
         docs = await db.schedules.find().to_list(None)
         day = today()
+        by_group: dict[str, list] = {}
+        for doc in docs:
+            by_group.setdefault(doc.get("group_name"), []).append(doc)
+
         current = sorted(latest_per_group(docs, day), key=group_sort_key)
         result = []
         for doc in current:
-            distribution = distribution_for(doc, day)
+            # Распределение ищем по всем версиям группы: приказ мог остаться в
+            # версии, которую более поздняя загрузка расписания уже сменила.
+            distribution = distribution_on_date(
+                by_group.get(doc.get("group_name"), [doc]), day
+            )
             shift_info = doc.get("shift_info") or {}
             result.append(
                 Schedule(
@@ -307,7 +315,9 @@ class ScheduleService:
         shift_info = newest.get("shift_info") or {}
         # Смена и кабинет — из версии, действующей на запрошенную дату: на 2–3
         # ноября часть групп переезжает во вторую смену, дальше — обычная.
-        distribution = distribution_for(newest, day_date)
+        # Смотрим все версии группы: приказ мог остаться в той, которую уже
+        # сменила более поздняя загрузка расписания.
+        distribution = distribution_on_date(docs, day_date)
         shift = distribution["shift"] or int(shift_info.get("shift") or 1)
         # Тот же момент, что и запрошенная дата: время пар подменяется по приказу
         # на эту дату, а не на сегодняшнюю.
@@ -634,19 +644,27 @@ class ScheduleService:
             without_schedule = []
             conflicts = []
             for group, entry in groups.items():
-                target = version_for_period(by_group.get(group, []), start, end)
-                if target is None:
+                # Приказ пишется во ВСЕ версии группы, чьё окно действия
+                # пересекается с периодом: на 2 и 3 ноября расписание могло
+                # прийти двумя файлами, и второй день не должен потерять смену.
+                targets = versions_for_period(by_group.get(group, []), start, end)
+                if not targets:
                     without_schedule.append(group)
                     continue
 
-                existing_from, existing_to = distribution_period(target)
-                if existing_from is not None and (
-                    existing_from != start or existing_to != end
-                ):
-                    conflicts.append((group, existing_from, existing_to))
+                conflict = None
+                for target in targets:
+                    existing_from, existing_to = distribution_period(target)
+                    if existing_from is not None and (
+                        existing_from != start or existing_to != end
+                    ):
+                        conflict = (existing_from, existing_to)
+                        break
+                if conflict is not None:
+                    conflicts.append((group, conflict[0], conflict[1]))
                     continue
 
-                plans.append((group, entry, target))
+                plans.append((group, entry, targets))
 
             if conflicts:
                 group, existing_from, existing_to = conflicts[0]
@@ -667,8 +685,8 @@ class ScheduleService:
             second_shift = 0
             without_classroom: list[str] = []
 
-            for group, entry, target in plans:
-                shift_info = target.get("shift_info") or {}
+            for group, entry, targets in plans:
+                shift_info = targets[0].get("shift_info") or {}
                 shift = entry.get("shift") or int(shift_info.get("shift") or 1)
 
                 fields = {
@@ -681,7 +699,10 @@ class ScheduleService:
                 if building_value is not None:
                     fields["building"] = building_value
 
-                await db.schedules.update_one({"_id": target["_id"]}, {"$set": fields})
+                for target in targets:
+                    await db.schedules.update_one(
+                        {"_id": target["_id"]}, {"$set": fields}
+                    )
                 updated += 1
 
                 if shift == 1:

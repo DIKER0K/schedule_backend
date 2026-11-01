@@ -453,6 +453,62 @@ def test_version_starting_inside_period_is_used(
 
 
 # --------------------------------------------------------------------------
+# 2.1. Период покрыт несколькими версиями расписания
+# --------------------------------------------------------------------------
+
+
+def test_order_covers_every_version_of_period(
+    fake_db, workdir, make_docx, make_distribution
+):
+    """Расписание на 2 и 3 ноября пришло двумя файлами — приказ ложится в обе."""
+    upload_schedule(
+        make_docx("v1.docx", schedule_docx({"9-1": week_lessons()}, valid_from="02.11.2026"))
+    )
+    upload_schedule(
+        make_docx("v2.docx", schedule_docx({"9-1": week_lessons()}, valid_from="03.11.2026"))
+    )
+
+    response = upload_distribution(
+        make_distribution("d1.docx", second_shift=[("9-1", "221")])
+    )
+
+    assert response.updated_groups == 1
+    assert response.second_shift == 1
+
+    stored = asyncio.run(fake_db.schedules.find({"group_name": "9-1"}).to_list(None))
+    assert len(stored) == 2
+    for doc in stored:
+        assert doc["shift"] == 2
+        assert doc["classroom"] == "221"
+
+    for day in (date(2026, 11, 2), date(2026, 11, 3)):
+        served = as_dict(get("9-1", "Вторник", day))
+        assert served["shift"] == 2
+        assert served["classroom"] == "221"
+
+
+def test_version_arrived_after_order_keeps_distribution(
+    two_shift_bells, make_docx, make_distribution
+):
+    """Правка расписания на 3 ноября пришла после приказа — приказ продолжает жить."""
+    upload_schedule(
+        make_docx("v1.docx", schedule_docx({"9-1": week_lessons()}, valid_from="02.11.2026"))
+    )
+    upload_distribution(make_distribution("d1.docx", second_shift=[("9-1", "221")]))
+
+    upload_schedule(
+        make_docx("v2.docx", schedule_docx({"9-1": week_lessons()}, valid_from="03.11.2026"))
+    )
+
+    served = as_dict(get("9-1", "Вторник", date(2026, 11, 3)))
+    assert served["shift"] == 2
+    assert served["classroom"] == "221"
+    # версия на 3 ноября не несёт распределения, но смена и время пар — из приказа
+    assert served["schedule"]["days"]["Вторник"]["1"]["time"] == "14:20–15:15"
+    assert served["valid_from"] == date(2026, 11, 3)
+
+
+# --------------------------------------------------------------------------
 # 3. Выдача: период кончился — снова первая смена
 # --------------------------------------------------------------------------
 

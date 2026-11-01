@@ -11,20 +11,22 @@
 `classrooms_valid_to`. Без границ переезд во вторую смену растянулся бы на всю
 версию, то есть до следующего приказа.
 
-Модуль состоит из чистых функций: разбор дат, разбор docx, выбор версии на
+Модуль состоит из чистых функций: разбор дат, разбор docx, выбор версий на
 период и значений, действующих на дату. Запись в Mongo — в
 `app/services/schedule_service`.
 """
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 from docx import Document
 
 from app.services.schedule_versions import (
+    MIN_DATE,
     applicable_versions,
     coerce_date,
+    version_end,
     version_start,
 )
 
@@ -221,29 +223,49 @@ def parse_distribution_document(path, fallback_year: Optional[int] = None) -> di
 # --------------------------------------------------------------------------
 
 
-def version_for_period(versions: list, start: Optional[date], end: Optional[date]):
-    """Версия расписания, к которой относится приказ на период [start, end].
+def _version_windows(versions: list):
+    """Окна действия версий группы: (документ, первый день, последний день).
 
-    Сначала берётся версия, действующая на первый день периода (обычный
-    случай: расписание загрузили раньше распределения). Если такой нет —
-    самая ранняя версия, начинающаяся внутри периода. Если нет и её, значит
-    расписания на этот период ещё нет: возвращается None, и загрузка отвечает
-    409, а не создаёт пустые версии.
+    Версия действует до начала следующей — так же её читают `applicable_versions`
+    и `merge_week` (дней, которых нет в новой версии, они берут из прежней).
+    Поэтому окно версии заканчивается накануне следующей, даже если `valid_to`
+    в документе не проставлен. `valid_to`, если он есть и раньше, важнее.
+    """
+    ordered = sorted(versions, key=version_start)
+    windows = []
+    for index, doc in enumerate(ordered):
+        start = version_start(doc)
+        end = version_end(doc)
+        if index + 1 < len(ordered):
+            next_start = version_start(ordered[index + 1])
+            # date.min (документы без valid_from) — границы раньше не бывает.
+            if next_start > MIN_DATE:
+                before_next = next_start - timedelta(days=1)
+                end = before_next if end is None else min(end, before_next)
+        windows.append((doc, start, end))
+    return windows
+
+
+def versions_for_period(versions: list, start: Optional[date], end: Optional[date]):
+    """Версии расписания группы, чьё окно действия пересекается с периодом.
+
+    Приказ на 2–3 ноября может лечь сразу в несколько версий: расписание
+    приходит отдельными файлами на каждый день, и на первые дни периода
+    действуют разные версии. Пишем во все, иначе второй день периода молча
+    остался бы без смены и кабинета. Порядок — от новой к старой.
     """
     if not versions or start is None:
-        return None
-
-    effective = applicable_versions(versions, start)
-    if effective:
-        return effective[0]
+        return []
 
     last = end or start
-    starting_inside = [
-        doc for doc in versions if start <= version_start(doc) <= last
-    ]
-    if starting_inside:
-        return sorted(starting_inside, key=version_start)[0]
-    return None
+    picked = []
+    for doc, window_start, window_end in _version_windows(versions):
+        if window_start > last:
+            continue
+        if window_end is not None and window_end < start:
+            continue
+        picked.append(doc)
+    return sorted(picked, key=version_start, reverse=True)
 
 
 EMPTY_DISTRIBUTION = {
@@ -290,3 +312,30 @@ def distribution_for(doc: dict, day: date) -> dict:
         "building": doc.get("building"),
         "classroom_note": doc.get("classroom_note") or None,
     }
+
+
+def distribution_on_date(versions: list, day: date) -> dict:
+    """Смена, кабинет, корпус и пометка, действующие на дату, по всем версиям.
+
+    Приказ пишется в версии, которые действовали в момент загрузки. Если позже
+    пришла новая версия расписания (например, на 3 ноября отдельным файлом),
+    распределение остаётся в прежней версии, но продолжает действовать:
+    поэтому дату проверяем по окну `classrooms_valid_from/to` у каждой версии
+    группы, начиная с действующей на эту дату версии.
+    """
+    if not versions:
+        return dict(EMPTY_DISTRIBUTION)
+
+    ordered = list(applicable_versions(versions, day))
+    ordered += sorted(
+        (doc for doc in versions if version_start(doc) > day),
+        key=version_start,
+        reverse=True,
+    )
+
+    for doc in ordered:
+        found = distribution_for(doc, day)
+        if any(value is not None for value in found.values()):
+            return found
+    return dict(EMPTY_DISTRIBUTION)
+
