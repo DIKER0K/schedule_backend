@@ -78,6 +78,15 @@ def normalize_group_name(value) -> str:
     return _clean(value)
 
 
+def group_key(value) -> str:
+    """Ключ сопоставления групп: без пробелов и регистра.
+
+    В приказе пишут «2ТД», в расписании та же группа называется «2 ТД» —
+    без общего ключа она молча осталась бы без кабинета.
+    """
+    return re.sub(r"\s+", "", _clean(value)).lower()
+
+
 def _month_number(word: str) -> Optional[int]:
     for stem, number in MONTH_STEMS:
         if word.startswith(stem):

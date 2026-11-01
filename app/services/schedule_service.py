@@ -20,6 +20,7 @@ from app.services.bell_service import apply_bell_schedule_from_files
 from app.services.classroom_distribution import (
     distribution_on_date,
     distribution_period,
+    group_key,
     parse_distribution_document,
     versions_for_period,
 )
@@ -215,12 +216,10 @@ class ScheduleService:
         В базе время пар проставлено при загрузке по смене группы из
         `group_shifts.json`. У версии смена своя: 2 и 3 ноября часть групп
         учится во вторую смену, и время пар у них считается по сетке второй
-        смены на эту дату — обычной или разовой из приказа. Первой смене
-        ничего не меняем: там всё уже стоит при загрузке.
+        смены на эту дату — обычной или разовой из приказа. Обратный случай
+        тоже возможен (группа постоянно во вторую смену, а приказ вернул её в
+        первую), поэтому сетка смены применяется в обе стороны.
         """
-        if shift != 2:
-            return schedule_data
-
         grid = bell_grid_for(day_date, shift)
         if not grid:
             return schedule_data
@@ -638,16 +637,26 @@ class ScheduleService:
             for doc in docs:
                 by_group.setdefault(doc.get("group_name"), []).append(doc)
 
+            # «2ТД» в приказе и «2 ТД» в расписании — одна и та же группа.
+            canonical: dict[str, str] = {}
+            for name in sorted(by_group, key=str):
+                canonical.setdefault(group_key(name), name)
+
             # Сначала проверяем всё, потом пишем: иначе половина групп уже
             # обновлена, а запрос упал.
             plans = []
             without_schedule = []
             conflicts = []
             for group, entry in groups.items():
+                # «2ТД» в приказе и «2 ТД» в расписании — одна и та же группа.
+                name = group
+                if name not in by_group:
+                    name = canonical.get(group_key(group)) or group
+
                 # Приказ пишется во ВСЕ версии группы, чьё окно действия
                 # пересекается с периодом: на 2 и 3 ноября расписание могло
                 # прийти двумя файлами, и второй день не должен потерять смену.
-                targets = versions_for_period(by_group.get(group, []), start, end)
+                targets = versions_for_period(by_group.get(name, []), start, end)
                 if not targets:
                     without_schedule.append(group)
                     continue

@@ -508,6 +508,27 @@ def test_version_arrived_after_order_keeps_distribution(
     assert served["valid_from"] == date(2026, 11, 3)
 
 
+def test_group_name_with_space_matches_order(
+    fake_db, workdir, make_docx, make_distribution
+):
+    """В расписании «2 ТД», в приказе «2ТД» — одна группа, без кабинета не остаётся."""
+    upload_schedule(
+        make_docx("v1.docx", schedule_docx({"2 ТД": week_lessons()}))
+    )
+
+    response = upload_distribution(
+        make_distribution("d1.docx", second_shift=[("2ТД", "212")])
+    )
+
+    assert response.updated_groups == 1
+    assert response.groups_without_schedule == []
+    assert response.second_shift == 1
+
+    served = as_dict(get("2 ТД", "Вторник", date(2026, 11, 3)))
+    assert served["shift"] == 2
+    assert served["classroom"] == "212"
+
+
 # --------------------------------------------------------------------------
 # 3. Выдача: период кончился — снова первая смена
 # --------------------------------------------------------------------------
