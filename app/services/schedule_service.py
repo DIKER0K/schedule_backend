@@ -988,6 +988,13 @@ class ScheduleService:
                 )
                 classroom, classroom_note = lesson_place(info, distribution)
 
+                # Практику («ПП») в расписании преподавателя не показываем: он и
+                # так знает, что группа на практике, а пометка вместо кабинета
+                # только занимает место. Дистанционку («ДО») оставляем — это
+                # занятие, которое преподаватель ведёт.
+                if (classroom_note or "").strip().upper() == "ПП":
+                    continue
+
                 shift_target.setdefault(day_name, {})
                 ScheduleService._put_lesson(
                     shift_target[day_name],

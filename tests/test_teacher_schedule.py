@@ -221,7 +221,7 @@ def test_empty_pair_classroom_takes_group_classroom(fake_db, bells):
     assert old["3"]["classroom"] is None
 
 
-@pytest.mark.parametrize("note", ["ПП", "ДО"])
+@pytest.mark.parametrize("note", ["ДО"])
 def test_classroom_note_instead_of_number(fake_db, bells, note):
     insert(
         fake_db,
@@ -240,6 +240,69 @@ def test_classroom_note_instead_of_number(fake_db, bells, note):
     slots = day_slots(teacher_schedule(on=date(2026, 11, 2)))
     assert slots["3"]["classroom"] is None
     assert slots["3"]["classroom_note"] == note
+
+
+def test_practice_pairs_are_hidden_from_teacher(fake_db, bells):
+    """Пара с пометкой «ПП» не попадает в расписание преподавателя.
+
+    Практика в приказе помечена вместо номера кабинета («ПП»), и владелец
+    попросил не показывать такие пары преподавателю: он и так знает, что
+    группа на практике, а строка занимает место. Обычные пары того же дня
+    при этом остаются, и нумерация не сдвигается.
+    """
+    insert(
+        fake_db,
+        version(
+            "3ИС-1",
+            date(2026, 11, 2),
+            days={
+                "Понедельник": {
+                    "2": lesson("ПП. 03.01 Практика", classroom=None),
+                    "3": lesson("Практика", classroom=None),
+                    "4": lesson("МДК 07.01", classroom="201"),
+                }
+            },
+            building=2,
+            classroom_note="ПП",
+            classrooms_valid_from=mongo_date(date(2026, 11, 2)),
+            classrooms_valid_to=mongo_date(date(2026, 11, 3)),
+        ),
+        version(
+            "2ИС-2",
+            date(2026, 11, 2),
+            days={"Понедельник": {"4": lesson("МДК 07.01", classroom="201")}},
+            classroom="201",
+            building=2,
+            classrooms_valid_from=mongo_date(date(2026, 11, 2)),
+            classrooms_valid_to=mongo_date(date(2026, 11, 3)),
+        ),
+    )
+
+    slots = day_slots(teacher_schedule(on=date(2026, 11, 2)))
+    assert "2" not in slots, "пара с пометкой ПП не должна показываться"
+    assert "3" not in slots
+    assert slots["4"]["subject"] == "МДК 07.01"
+    assert slots["4"]["classroom"] == "201"
+
+
+def test_day_with_only_practice_is_204(fake_db, bells):
+    """Если в день у преподавателя только практика — «пар нет», а не пустой список."""
+    insert(
+        fake_db,
+        version(
+            "3ИС-1",
+            date(2026, 11, 2),
+            days={"Понедельник": {"1": lesson("Практика")}},
+            building=2,
+            classroom_note="ПП",
+            classrooms_valid_from=mongo_date(date(2026, 11, 2)),
+            classrooms_valid_to=mongo_date(date(2026, 11, 3)),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        teacher_schedule(day="Понедельник", on=date(2026, 11, 2))
+    assert exc.value.status_code == 204
 
 
 def test_group_classroom_applies_to_parallel_groups(fake_db, bells):
