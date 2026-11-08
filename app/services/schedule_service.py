@@ -992,7 +992,14 @@ class ScheduleService:
                 # так знает, что группа на практике, а пометка вместо кабинета
                 # только занимает место. Дистанционку («ДО») оставляем — это
                 # занятие, которое преподаватель ведёт.
-                if (classroom_note or "").strip().upper() == "ПП":
+                # В новых приказах ПП стоит не в пометке кабинета, а в названии
+                # предмета («ПП.05.01 Соадминистрирование…»), поэтому проверяем оба.
+                subject_title = str(info.get("subject") or "").strip().upper()
+                if (
+                    (classroom_note or "").strip().upper() == "ПП"
+                    or subject_title.startswith("ПП.")
+                    or subject_title.startswith("ПП ")
+                ):
                     continue
 
                 shift_target.setdefault(day_name, {})

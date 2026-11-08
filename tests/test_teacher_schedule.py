@@ -285,6 +285,38 @@ def test_practice_pairs_are_hidden_from_teacher(fake_db, bells):
     assert slots["4"]["classroom"] == "201"
 
 
+def test_practice_in_subject_title_is_hidden_from_teacher(fake_db, bells):
+    """ПП в названии предмета тоже не показывается преподавателю.
+
+    В приказах с 09.11 практика помечена не в кабинете, а в самом предмете
+    («ПП.05.01 Соадминистрирование…»), classroom_note при этом пустой.
+    Обычные пары того же дня остаются.
+    """
+    insert(
+        fake_db,
+        version(
+            "4ИС-2",
+            date(2026, 11, 9),
+            days={
+                "Понедельник": {
+                    "1": lesson("ПП.05.01 Соадминистрирование и автоматизация баз данных", classroom=None),
+                    "2": lesson("ПП.05.01 Соадминистрирование и автоматизация баз данных", classroom=None),
+                    "4": lesson("Информатика", classroom="205"),
+                }
+            },
+            building=2,
+            classroom_note=None,
+            classrooms_valid_from=mongo_date(date(2026, 11, 9)),
+            classrooms_valid_to=mongo_date(date(2026, 11, 10)),
+        ),
+    )
+
+    slots = day_slots(teacher_schedule(on=date(2026, 11, 9)))
+    assert "1" not in slots, "ПП в названии предмета не должна показываться"
+    assert "2" not in slots
+    assert slots["4"]["subject"] == "Информатика"
+
+
 def test_day_with_only_practice_is_204(fake_db, bells):
     """Если в день у преподавателя только практика — «пар нет», а не пустой список."""
     insert(
